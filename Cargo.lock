@@ -74,6 +74,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "resp",
  "thiserror",
  "tokio",
 ]
@@ -206,6 +207,12 @@ checksum = "c82cf8cff14456045f55ec4241383baeff27af886adb72ffb2162f99911de0fd"
 dependencies = [
  "bitflags",
 ]
+
+[[package]]
+name = "resp"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d276d153c2c18b622527a9118d8055e4e26530f15d616d6290b00acc7e2f6aa"
 
 [[package]]
 name = "rustc-demangle"

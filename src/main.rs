@@ -1,5 +1,7 @@
+use anyhow::Result;
+use resp::{Decoder, Value};
 use std::{
-    io::{Read, Write},
+    io::{BufReader, ErrorKind, Write},
     net::{TcpListener, TcpStream},
     thread,
 };
@@ -25,24 +27,49 @@ fn main() {
 }
 
 fn handle_client(mut stream: TcpStream) {
-    let mut buf = [0; 512];
     loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                let command = String::from_utf8(buf[0..n].to_vec());
-                if command.is_ok() {
-                    let command = command.unwrap();
-                    if command.contains("PING") {
-                        println!("responding with PONG\r\n");
-                        stream.write_all(b"+PONG\r\n").unwrap();
-                    }
+        let bufreader = BufReader::new(&stream);
+        let mut decoder = Decoder::new(bufreader);
+        let mut result: Option<Value> = None;
+
+        match decoder.decode() {
+            Ok(value) => {
+                let (command, args) = extract_command(value).unwrap();
+                result = match command.to_lowercase().as_str() {
+                    "ping" => Some(Value::String("PONG".to_string())),
+                    "echo" => Some(args.first().unwrap().clone()),
+                    c => panic!("Cannot handle command {}", c),
                 }
             }
             Err(e) => {
-                println!("error: {}", e);
+                if e.kind() == ErrorKind::UnexpectedEof {
+                    println!("client disconnected");
+                    return;
+                }
+                eprintln!("error: {}", e);
             }
         }
-        buf = [0; 512];
+
+        if let Some(r) = result {
+            stream.write_all(&r.encode()).unwrap();
+        }
+    }
+}
+
+fn extract_command(value: Value) -> Result<(String, Vec<Value>)> {
+    match value {
+        Value::Array(a) => {
+            let command = unpack_bulk_string(a.first().unwrap().clone())?;
+            let args = a.into_iter().skip(1).collect();
+            Ok((command, args))
+        }
+        _ => Err(anyhow::anyhow!("Unexpected command format")),
+    }
+}
+
+fn unpack_bulk_string(value: Value) -> Result<String> {
+    match value {
+        Value::Bulk(s) => Ok(s),
+        _ => Err(anyhow::anyhow!("Expected command to be bulk string")),
     }
 }

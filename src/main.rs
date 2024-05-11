@@ -1,6 +1,7 @@
 use std::{
     io::{Read, Write},
     net::{TcpListener, TcpStream},
+    thread,
 };
 
 static PORT: u16 = 6379;
@@ -12,7 +13,9 @@ fn main() {
         match stream {
             Ok(stream) => {
                 println!("accepted new connection");
-                handle_connection(stream);
+                thread::spawn(move || {
+                    handle_client(stream);
+                });
             }
             Err(e) => {
                 println!("error: {}", e);
@@ -21,7 +24,7 @@ fn main() {
     }
 }
 
-fn handle_connection(mut stream: TcpStream) {
+fn handle_client(mut stream: TcpStream) {
     let mut buf = [0; 512];
     loop {
         match stream.read(&mut buf) {

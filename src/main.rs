@@ -13,7 +13,8 @@ use db::Store;
 static PORT: u16 = 6379;
 
 fn main() {
-    let listener = TcpListener::bind(format!("127.0.0.1:{PORT}")).unwrap();
+    let port = get_port_from_args();
+    let listener = TcpListener::bind(format!("127.0.0.1:{port}")).unwrap();
     let store = Store::new();
 
     for stream in listener.incoming() {
@@ -30,6 +31,14 @@ fn main() {
             }
         }
     }
+}
+
+fn get_port_from_args() -> String {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() < 3 || args[1] != "--port" {
+        return PORT.to_string();
+    }
+    args[2].clone()
 }
 
 fn handle_client(mut stream: TcpStream, store: Store) {

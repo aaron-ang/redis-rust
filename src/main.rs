@@ -12,6 +12,7 @@ mod db;
 use db::Store;
 
 static PORT: u16 = 6379;
+static REP_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -155,8 +156,11 @@ fn handle_get(args: Vec<Value>, store: &Store) -> Result<Value> {
 
 fn handle_info(cmd_args: &Args) -> Result<Value> {
     let role = match cmd_args.replicaof {
-        Some(_) => "slave",
-        None => "master",
+        Some(_) => "slave".to_string(),
+        None => "master".to_string(),
     };
-    Ok(Value::Bulk(format!("role:{role}")))
+    let mut value = format!("role:{role}");
+    value.push_str(format!("master_replid:{REP_ID}").as_str());
+    value.push_str("master_repl_offset:0");
+    Ok(Value::Bulk(value))
 }

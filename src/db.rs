@@ -9,12 +9,10 @@ struct RedisData {
     value: String,
     expiry: Option<SystemTime>,
 }
-
 #[derive(Clone)]
 pub struct Store {
     storage: Arc<Mutex<HashMap<String, RedisData>>>,
 }
-
 impl Store {
     pub fn new() -> Self {
         Store {

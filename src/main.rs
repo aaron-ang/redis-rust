@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64::prelude::*;
 use clap::Parser;
 use log::{error, info};
 use resp::{Decoder, Value};
@@ -15,6 +16,7 @@ use db::Store;
 static PORT: u16 = 6379;
 static REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 static REPL_OFFSET: usize = 0;
+static EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
 
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
@@ -149,18 +151,30 @@ fn handle_conn(mut stream: TcpStream, store: Store, role: &str) {
         let bufreader = BufReader::new(&stream);
         let mut decoder = Decoder::new(bufreader);
 
-        let result = match decoder.decode() {
+        match decoder.decode() {
             Ok(value) => {
                 let (command, args) = extract_command(&value).unwrap();
-                match command.to_lowercase().as_str() {
-                    "ping" => Ok(Value::String("PONG".into())),
-                    "echo" => Ok(args.first().unwrap().clone()),
-                    "set" => handle_set(args, &store),
-                    "get" => handle_get(args, &store),
-                    "info" => handle_info(role),
-                    "replconf" => Ok(Value::String("OK".into())),
-                    "psync" => Ok(Value::String(format!("FULLRESYNC {REPL_ID} 0"))),
-                    c => Err(anyhow::anyhow!("Unknown command: {c}")),
+                let result = match command.to_lowercase().as_str() {
+                    "ping" => {
+                        let response = Value::String("PONG".into());
+                        stream.write_all(&response.encode()).map_err(Into::into)
+                    }
+                    "echo" => {
+                        let msg = args.first().unwrap().clone();
+                        stream.write_all(&msg.encode()).map_err(Into::into)
+                    }
+                    "set" => handle_set(args, &store, &mut stream),
+                    "get" => handle_get(args, &store, &mut stream),
+                    "info" => handle_info(role, &mut stream),
+                    "replconf" => {
+                        let response = Value::String("OK".into());
+                        stream.write_all(&response.encode()).map_err(Into::into)
+                    }
+                    "psync" => handle_psync(&mut stream),
+                    c => Err(anyhow::anyhow!("Unknown command: {}", c)),
+                };
+                if let Err(e) = result {
+                    error!("{}", e);
                 }
             }
             Err(e) => {
@@ -168,18 +182,9 @@ fn handle_conn(mut stream: TcpStream, store: Store, role: &str) {
                     error!("client disconnected");
                     return;
                 }
-                Err(e.into())
+                error!("{}", e);
             }
         };
-
-        match result {
-            Ok(value) => {
-                stream.write_all(&value.encode()).unwrap();
-            }
-            Err(e) => {
-                error!("error: {e}");
-            }
-        }
     }
 }
 
@@ -201,56 +206,71 @@ fn unpack_bulk_string(value: &Value) -> Result<String> {
     }
 }
 
-fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
+fn handle_set(args: Vec<Value>, store: &Store, stream: &mut TcpStream) -> Result<()> {
     if args.len() < 2 {
-        return Ok(Value::Error(
-            "wrong number of arguments for 'set' command".into(),
-        ));
+        let error_msg = Value::Error("wrong number of arguments for 'set' command".into());
+        return stream.write_all(&error_msg.encode()).map_err(Into::into);
     }
+
     let mut iter = args.into_iter();
-    let key = unpack_bulk_string(&iter.next().unwrap()).unwrap();
-    let value = unpack_bulk_string(&iter.next().unwrap()).unwrap();
+    let key = unpack_bulk_string(&iter.next().unwrap())?;
+    let value = unpack_bulk_string(&iter.next().unwrap())?;
+    let mut msg: Value = Value::String("OK".into());
     let mut expiry: Option<SystemTime> = None;
 
     if let Some(Value::Bulk(option)) = iter.next() {
         match option.to_lowercase().as_str() {
             "px" => {
                 let ms = match iter.next() {
-                    Some(Value::Bulk(arg)) => arg.parse::<u64>().unwrap(),
+                    Some(Value::Bulk(arg)) => arg.parse::<u64>()?,
                     _ => {
-                        return Ok(Value::Error("argument is not a bulk string".into()));
+                        msg = Value::Error("wrong number of arguments for 'set' command".into());
+                        return stream.write_all(&msg.encode()).map_err(Into::into);
                     }
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
             _ => {
-                return Ok(Value::Error("option not supported".into()));
+                msg = Value::Error("option not supported".into());
             }
         }
     }
 
-    store.write(key, value, expiry).unwrap();
-    Ok(Value::String("OK".into()))
+    store.write(key, value, expiry)?;
+    stream.write_all(&msg.encode())?;
+    Ok(())
 }
 
-fn handle_get(args: Vec<Value>, store: &Store) -> Result<Value> {
+fn handle_get(args: Vec<Value>, store: &Store, stream: &mut TcpStream) -> Result<()> {
     if args.len() < 1 {
-        return Ok(Value::Error(
-            "wrong number of arguments for 'get' command".into(),
-        ));
+        let error_msg = Value::Error("wrong number of arguments for 'get' command".into());
+        return stream.write_all(&error_msg.encode()).map_err(Into::into);
     }
     let key = unpack_bulk_string(&args[0]).unwrap();
-    match store.read(&key) {
-        Ok(value) => Ok(Value::Bulk(value)),
+    let msg = match store.read(&key) {
+        Ok(value) => Value::Bulk(value),
         Err(e) => {
             error!("error: {e}");
-            Ok(Value::Null)
+            Value::Null
         }
-    }
+    };
+    stream.write_all(&msg.encode())?;
+    Ok(())
 }
 
-fn handle_info(role: &str) -> Result<Value> {
+fn handle_info(role: &str, stream: &mut TcpStream) -> Result<()> {
     let value =
         format!("role:{role}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}");
-    Ok(Value::Bulk(value))
+    stream.write_all(&Value::Bulk(value).encode())?;
+    Ok(())
+}
+
+fn handle_psync(stream: &mut TcpStream) -> Result<()> {
+    let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
+    stream.write_all(&msg.encode())?;
+
+    let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64.as_bytes())?;
+    stream.write(format!("${}\r\n", rdb.len()).as_bytes())?;
+    stream.write_all(&rdb)?;
+    Ok(())
 }

@@ -27,17 +27,16 @@ struct Args {
 
 fn main() -> Result<()> {
     let cmd_args = Args::parse();
-    let port = cmd_args.port;
-    let role = if let Some((host, port)) = parse_replica(&cmd_args) {
-        let mut stream = TcpStream::connect(format!("{}:{}", host, port))?;
-        let reply = Value::Array(vec![Value::Bulk("PING".to_string())]);
-        stream.write_all(&reply.encode())?;
+    let listening_port = cmd_args.port;
+    let role = if let Some((host, master_port)) = parse_replica(&cmd_args) {
+        let stream = TcpStream::connect(format!("{}:{}", host, master_port))?;
+        thread::spawn(move || handshake(stream, listening_port));
         "slave"
     } else {
         "master"
     };
 
-    let listener = TcpListener::bind(format!("127.0.0.1:{port}"))?;
+    let listener = TcpListener::bind(format!("127.0.0.1:{listening_port}"))?;
     let store = Store::new();
 
     for stream in listener.incoming() {
@@ -46,7 +45,7 @@ fn main() -> Result<()> {
             Ok(stream) => {
                 info!("Accepted new connection");
                 thread::spawn(move || {
-                    handle_client(stream, store_clone, role);
+                    handle_conn(stream, store_clone, role);
                 });
             }
             Err(e) => {
@@ -70,7 +69,73 @@ fn parse_replica(cmd_args: &Args) -> Option<(String, u16)> {
     None
 }
 
-fn handle_client(mut stream: TcpStream, store: Store, role: &str) {
+fn handshake(mut stream: TcpStream, port: u16) -> Result<()> {
+    send_ping(&mut stream)?;
+    check_ping_response(&mut stream)?;
+
+    send_replconf_port(&mut stream, port)?;
+    send_replconf_capa(&mut stream)?;
+
+    check_replconf_response(&mut stream)?;
+
+    Ok(())
+}
+
+fn send_ping(stream: &mut TcpStream) -> Result<()> {
+    let ping = Value::Array(vec![Value::Bulk("PING".into())]);
+    stream.write_all(&ping.encode())?;
+    stream.flush()?;
+    Ok(())
+}
+
+fn check_ping_response(stream: &mut TcpStream) -> Result<()> {
+    let response = Decoder::new(BufReader::new(stream)).decode()?;
+    if let Value::String(res_str) = response {
+        if res_str != "PONG" {
+            return Err(anyhow::anyhow!("Unexpected response to PING: {}", res_str));
+        }
+    } else {
+        return Err(anyhow::anyhow!("Unexpected response to PING"));
+    }
+    Ok(())
+}
+
+fn send_replconf_port(stream: &mut TcpStream, port: u16) -> Result<()> {
+    let replconf_port = Value::Array(vec![
+        Value::Bulk("REPLCONF".into()),
+        Value::Bulk("listening-port".into()),
+        Value::Bulk(port.to_string()),
+    ]);
+    stream.write_all(&replconf_port.encode())?;
+    Ok(())
+}
+
+fn send_replconf_capa(stream: &mut TcpStream) -> Result<()> {
+    let replconf_capa = Value::Array(vec![
+        Value::Bulk("REPLCONF".into()),
+        Value::Bulk("capa".into()),
+        Value::Bulk("eof".into()),
+    ]);
+    stream.write_all(&replconf_capa.encode())?;
+    Ok(())
+}
+
+fn check_replconf_response(stream: &mut TcpStream) -> Result<()> {
+    let response = Decoder::new(BufReader::new(stream)).decode()?;
+    if let Value::String(res_str) = response {
+        if res_str != "OK" {
+            return Err(anyhow::anyhow!(
+                "Unexpected response to REPLCONF: {}",
+                res_str
+            ));
+        }
+    } else {
+        return Err(anyhow::anyhow!("Unexpected response to REPLCONF"));
+    }
+    Ok(())
+}
+
+fn handle_conn(mut stream: TcpStream, store: Store, role: &str) {
     loop {
         let bufreader = BufReader::new(&stream);
         let mut decoder = Decoder::new(bufreader);
@@ -79,17 +144,12 @@ fn handle_client(mut stream: TcpStream, store: Store, role: &str) {
             Ok(value) => {
                 let (command, args) = extract_command(&value).unwrap();
                 match command.to_lowercase().as_str() {
-                    "ping" => Ok(Value::String("PONG".to_string())),
+                    "ping" => Ok(Value::String("PONG".into())),
                     "echo" => Ok(args.first().unwrap().clone()),
                     "set" => handle_set(args, &store),
                     "get" => handle_get(args, &store),
-                    "info" => {
-                        let value = format!(
-                            "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-                            role, REP_ID, REPL_OFFSET
-                        );
-                        Ok(Value::Bulk(value))
-                    }
+                    "info" => handle_info(role),
+                    "replconf" => Ok(Value::String("OK".into())),
                     c => Err(anyhow::anyhow!("Unknown command: {}", c)),
                 }
             }
@@ -125,7 +185,7 @@ fn extract_command(value: &Value) -> Result<(String, Vec<Value>)> {
 
 fn unpack_bulk_string(value: &Value) -> Result<String> {
     if let Value::Bulk(s) = value {
-        Ok(s.to_string())
+        Ok(s.into())
     } else {
         Err(anyhow::anyhow!("Expected command to be bulk string"))
     }
@@ -134,7 +194,7 @@ fn unpack_bulk_string(value: &Value) -> Result<String> {
 fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
     if args.len() < 2 {
         return Ok(Value::Error(
-            "wrong number of arguments for 'set' command".to_string(),
+            "wrong number of arguments for 'set' command".into(),
         ));
     }
     let mut iter = args.into_iter();
@@ -148,25 +208,25 @@ fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
                 let ms = match iter.next() {
                     Some(Value::Bulk(arg)) => arg.parse::<u64>().unwrap(),
                     _ => {
-                        return Ok(Value::Error("argument is not a bulk string".to_string()));
+                        return Ok(Value::Error("argument is not a bulk string".into()));
                     }
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
             _ => {
-                return Ok(Value::Error("option not supported".to_string()));
+                return Ok(Value::Error("option not supported".into()));
             }
         }
     }
 
     store.write(key, value, expiry).unwrap();
-    Ok(Value::String("OK".to_string()))
+    Ok(Value::String("OK".into()))
 }
 
 fn handle_get(args: Vec<Value>, store: &Store) -> Result<Value> {
     if args.len() < 1 {
         return Ok(Value::Error(
-            "wrong number of arguments for 'get' command".to_string(),
+            "wrong number of arguments for 'get' command".into(),
         ));
     }
     let key = unpack_bulk_string(&args[0]).unwrap();
@@ -177,4 +237,12 @@ fn handle_get(args: Vec<Value>, store: &Store) -> Result<Value> {
             Ok(Value::Null)
         }
     }
+}
+
+fn handle_info(role: &str) -> Result<Value> {
+    let value = format!(
+        "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
+        role, REP_ID, REPL_OFFSET
+    );
+    Ok(Value::Bulk(value))
 }

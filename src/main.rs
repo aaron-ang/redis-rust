@@ -13,7 +13,7 @@ mod db;
 use db::Store;
 
 static PORT: u16 = 6379;
-static REP_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+static REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 static REPL_OFFSET: usize = 0;
 
 #[derive(Parser, Debug, Clone)]
@@ -29,7 +29,7 @@ fn main() -> Result<()> {
     let cmd_args = Args::parse();
     let listening_port = cmd_args.port;
     let role = if let Some((host, master_port)) = parse_replica(&cmd_args) {
-        let stream = TcpStream::connect(format!("{}:{}", host, master_port))?;
+        let stream = TcpStream::connect(format!("{host}:{master_port}"))?;
         thread::spawn(move || handshake(stream, listening_port));
         "slave"
     } else {
@@ -49,7 +49,7 @@ fn main() -> Result<()> {
                 });
             }
             Err(e) => {
-                error!("Error: {}", e);
+                error!("Error: {e}");
             }
         }
     }
@@ -75,8 +75,9 @@ fn handshake(mut stream: TcpStream, port: u16) -> Result<()> {
 
     send_replconf_port(&mut stream, port)?;
     send_replconf_capa(&mut stream)?;
-
     check_replconf_response(&mut stream)?;
+
+    send_psync(&mut stream)?;
 
     Ok(())
 }
@@ -84,15 +85,15 @@ fn handshake(mut stream: TcpStream, port: u16) -> Result<()> {
 fn send_ping(stream: &mut TcpStream) -> Result<()> {
     let ping = Value::Array(vec![Value::Bulk("PING".into())]);
     stream.write_all(&ping.encode())?;
-    stream.flush()?;
     Ok(())
 }
 
 fn check_ping_response(stream: &mut TcpStream) -> Result<()> {
+    stream.flush()?;
     let response = Decoder::new(BufReader::new(stream)).decode()?;
     if let Value::String(res_str) = response {
         if res_str != "PONG" {
-            return Err(anyhow::anyhow!("Unexpected response to PING: {}", res_str));
+            return Err(anyhow::anyhow!("Unexpected response to PING: {res_str}"));
         }
     } else {
         return Err(anyhow::anyhow!("Unexpected response to PING"));
@@ -121,17 +122,25 @@ fn send_replconf_capa(stream: &mut TcpStream) -> Result<()> {
 }
 
 fn check_replconf_response(stream: &mut TcpStream) -> Result<()> {
-    let response = Decoder::new(BufReader::new(stream)).decode()?;
-    if let Value::String(res_str) = response {
-        if res_str != "OK" {
-            return Err(anyhow::anyhow!(
-                "Unexpected response to REPLCONF: {}",
-                res_str
-            ));
+    stream.flush()?;
+    // check that 2 OK's are received
+    for _ in 0..2 {
+        let response = Decoder::new(BufReader::new(&mut *stream)).decode()?;
+        match response {
+            Value::String(res_str) if res_str == "OK" => continue,
+            _ => return Err(anyhow::anyhow!("Unexpected response to REPLCONF")),
         }
-    } else {
-        return Err(anyhow::anyhow!("Unexpected response to REPLCONF"));
     }
+    Ok(())
+}
+
+fn send_psync(stream: &mut TcpStream) -> Result<()> {
+    let psync = Value::Array(vec![
+        Value::Bulk("PSYNC".into()),
+        Value::Bulk("?".into()),
+        Value::Bulk("-1".to_string()),
+    ]);
+    stream.write_all(&psync.encode())?;
     Ok(())
 }
 
@@ -150,7 +159,8 @@ fn handle_conn(mut stream: TcpStream, store: Store, role: &str) {
                     "get" => handle_get(args, &store),
                     "info" => handle_info(role),
                     "replconf" => Ok(Value::String("OK".into())),
-                    c => Err(anyhow::anyhow!("Unknown command: {}", c)),
+                    "psync" => Ok(Value::String(format!("FULLRESYNC {REPL_ID} 0"))),
+                    c => Err(anyhow::anyhow!("Unknown command: {c}")),
                 }
             }
             Err(e) => {
@@ -167,7 +177,7 @@ fn handle_conn(mut stream: TcpStream, store: Store, role: &str) {
                 stream.write_all(&value.encode()).unwrap();
             }
             Err(e) => {
-                error!("error: {}", e);
+                error!("error: {e}");
             }
         }
     }
@@ -233,16 +243,14 @@ fn handle_get(args: Vec<Value>, store: &Store) -> Result<Value> {
     match store.read(&key) {
         Ok(value) => Ok(Value::Bulk(value)),
         Err(e) => {
-            error!("error: {}", e);
+            error!("error: {e}");
             Ok(Value::Null)
         }
     }
 }
 
 fn handle_info(role: &str) -> Result<Value> {
-    let value = format!(
-        "role:{}\r\nmaster_replid:{}\r\nmaster_repl_offset:{}",
-        role, REP_ID, REPL_OFFSET
-    );
+    let value =
+        format!("role:{role}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}");
     Ok(Value::Bulk(value))
 }

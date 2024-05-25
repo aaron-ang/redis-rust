@@ -20,19 +20,18 @@ impl Store {
         }
     }
 
-    pub fn read(&self, key: &String) -> Result<String> {
+    pub fn read(&self, key: &str) -> Result<String> {
         let mut storage = self.storage.lock().unwrap();
-        match storage.get(key) {
-            None => Err(anyhow::anyhow!("Key not found")),
-            Some(data) => {
-                if let Some(expiry) = data.expiry {
-                    if expiry < SystemTime::now() {
-                        storage.remove(key);
-                        return Err(anyhow::anyhow!("Key expired"));
-                    }
+        if let Some(data) = storage.get(key) {
+            if let Some(expiry) = data.expiry {
+                if expiry < SystemTime::now() {
+                    storage.remove(key);
+                    return Err(anyhow::anyhow!("Key expired"));
                 }
-                Ok(data.value.clone())
             }
+            Ok(data.value.clone())
+        } else {
+            Err(anyhow::anyhow!("Key not found"))
         }
     }
 

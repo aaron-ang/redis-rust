@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -20,24 +19,23 @@ impl Store {
         }
     }
 
-    pub fn read(&self, key: &str) -> Result<String> {
+    pub fn get(&self, key: &str) -> Option<String> {
         let mut storage = self.storage.lock().unwrap();
         if let Some(data) = storage.get(key) {
             if let Some(expiry) = data.expiry {
                 if expiry < SystemTime::now() {
                     storage.remove(key);
-                    return Err(anyhow::anyhow!("Key expired"));
+                    return None;
                 }
             }
-            Ok(data.value.clone())
+            Some(data.value.clone())
         } else {
-            Err(anyhow::anyhow!("Key not found"))
+            None
         }
     }
 
-    pub fn write(&self, key: String, value: String, expiry: Option<SystemTime>) -> Result<()> {
+    pub fn set(&self, key: String, value: String, expiry: Option<SystemTime>) {
         let mut storage = self.storage.lock().unwrap();
         storage.insert(key, RedisData { value, expiry });
-        Ok(())
     }
 }

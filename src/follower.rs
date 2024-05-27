@@ -1,12 +1,13 @@
 use crate::db::Store;
+use crate::server::{self, EMPTY_RDB_B64};
 
 use anyhow::Result;
+use base64::prelude::*;
 use resp::{Decoder, Value};
 use std::io::BufReader;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    time::{sleep, Duration},
 };
 
 pub struct Follower {
@@ -22,43 +23,36 @@ impl Follower {
     pub async fn handle_conn(&self, mut stream: TcpStream) -> Result<()> {
         send_ping(&mut stream).await?;
         check_ping_response(&mut stream).await?;
-
-        send_replconf_port(&mut stream, self.port).await?;
-        send_replconf_capa(&mut stream).await?;
+        send_replconf(&mut stream, self.port).await?;
         check_replconf_response(&mut stream).await?;
-
         send_psync(&mut stream).await?;
+        check_psync_response(&mut stream).await?;
 
+        let mut buf = [0; 1024];
         loop {
-            sleep(Duration::from_millis(10)).await;
-
-            let mut buf = [0; 1024];
             let bytes_read = stream.read(&mut buf).await?;
-            let bufreader = BufReader::new(&buf[..bytes_read]);
-            let mut decoder = Decoder::new(bufreader);
-
-            let _ = match decoder.decode() {
-                Ok(_) => {
-                    // let (command, args) = extract_command(&value).unwrap();
-                    // match command.to_lowercase().as_str() {
-                    //     "ping" => Some(Value::String("PONG".into())),
-                    //     "echo" => Some(args.first().unwrap().clone()),
-                    //     "set" => handle_set(args, &self.store).map(|v| {
-                    //         println!("Sent to followers: {:?}", value);
-                    //         v
-                    //     }),
-                    //     "get" => handle_get(args, &self.store),
-                    //     "info" => handle_info(self.role),
-                    //     "replconf" => Some(Value::String("OK".into())),
-                    //     "psync" => handle_psync(&mut stream, &mut replication).await,
-                    //     _ => Some(Value::Error("ERR unknown command".into())),
-                    // }
+            if bytes_read == 0 {
+                eprintln!("Follower disconnected");
+                break;
+            }
+            let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
+            while let Some(value) = decoder.decode().ok() {
+                println!("Follower received value: {:?}", value);
+                let (command, args) = server::extract_command(&value).unwrap();
+                let response = match command.to_lowercase().as_str() {
+                    "set" => {
+                        server::handle_set(args, &self.store);
+                        None
+                    }
+                    "get" => server::handle_get(args, &self.store),
+                    _ => Some(Value::Error("ERR unknown command".into())),
+                };
+                if let Some(response) = response {
+                    stream.write_all(&response.encode()).await?;
                 }
-                Err(e) => {
-                    eprintln!("Error decoding value: {:?}", e);
-                }
-            };
+            }
         }
+        Ok(())
     }
 }
 
@@ -69,31 +63,23 @@ async fn send_ping(stream: &mut TcpStream) -> Result<()> {
 }
 
 async fn check_ping_response(stream: &mut TcpStream) -> Result<()> {
-    stream.flush().await?;
     let mut buf = [0; 1024];
-    stream.read(&mut buf).await?;
-    let response = Decoder::new(BufReader::new(&buf[..])).decode()?;
-    if let Value::String(res_str) = response {
-        if res_str != "PONG" {
-            return Err(anyhow::anyhow!("Unexpected response to PING: {res_str}"));
-        }
-    } else {
-        return Err(anyhow::anyhow!("Unexpected response to PING"));
+    stream.flush().await?;
+    let bytes_read = stream.read(&mut buf).await?;
+    let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
+    match response {
+        Value::String(res_str) if res_str == "PONG" => Ok(()),
+        _ => Err(anyhow::anyhow!("Unexpected response to PING")),
     }
-    Ok(())
 }
 
-async fn send_replconf_port(stream: &mut TcpStream, my_port: u16) -> Result<()> {
+async fn send_replconf(stream: &mut TcpStream, my_port: u16) -> Result<()> {
     let replconf_port = Value::Array(vec![
         Value::Bulk("REPLCONF".into()),
         Value::Bulk("listening-port".into()),
         Value::Bulk(my_port.to_string()),
     ]);
     stream.write_all(&replconf_port.encode()).await?;
-    Ok(())
-}
-
-async fn send_replconf_capa(stream: &mut TcpStream) -> Result<()> {
     let replconf_capa = Value::Array(vec![
         Value::Bulk("REPLCONF".into()),
         Value::Bulk("capa".into()),
@@ -104,16 +90,19 @@ async fn send_replconf_capa(stream: &mut TcpStream) -> Result<()> {
 }
 
 async fn check_replconf_response(stream: &mut TcpStream) -> Result<()> {
-    stream.flush().await?;
     let mut buf = [0; 1024];
-    stream.read(&mut buf).await?;
+    stream.flush().await?;
+    let mut num_ok = 0;
 
     // check that 2 OK's are received
-    for _ in 0..2 {
-        let response = Decoder::new(BufReader::new(&buf[..])).decode()?;
-        match response {
-            Value::String(res_str) if res_str == "OK" => continue,
-            _ => return Err(anyhow::anyhow!("Unexpected response to REPLCONF")),
+    while num_ok < 2 {
+        let bytes_read = stream.read(&mut buf).await?;
+        let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
+        while let Some(response) = decoder.decode().ok() {
+            match response {
+                Value::String(res_str) if res_str == "OK" => num_ok += 1,
+                _ => return Err(anyhow::anyhow!("Unexpected response to REPLCONF")),
+            }
         }
     }
     Ok(())
@@ -126,5 +115,31 @@ async fn send_psync(stream: &mut TcpStream) -> Result<()> {
         Value::Bulk("-1".to_string()),
     ]);
     stream.write_all(&psync.encode()).await?;
+    Ok(())
+}
+
+async fn check_psync_response(stream: &mut TcpStream) -> Result<()> {
+    stream.flush().await?;
+
+    let mut buf = [0; 1024];
+    let mut bytes_read = stream.read(&mut buf).await?;
+    let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
+    if let Value::String(res_str) = response {
+        if !res_str.starts_with("FULLRESYNC") {
+            return Err(anyhow::anyhow!("Unexpected response to PSYNC: {res_str}"));
+        }
+    } else {
+        return Err(anyhow::anyhow!("Unexpected response to PSYNC"));
+    }
+
+    // verify RDB file
+    let mut rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
+    let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
+    msg_bytes.append(&mut rdb);
+
+    bytes_read = stream.read(&mut buf).await?;
+    if &buf[..bytes_read] != msg_bytes {
+        return Err(anyhow::anyhow!("Unexpected RDB file"));
+    }
     Ok(())
 }

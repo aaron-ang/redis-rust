@@ -161,6 +161,7 @@ async fn handle_psync(stream: &mut TcpStream, replication: &mut bool) -> Option<
         .await
         .unwrap();
     stream.write_all(&rdb).await.unwrap();
+    stream.flush().await.unwrap();
     *replication = true;
     None
 }

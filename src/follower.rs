@@ -13,20 +13,25 @@ use tokio::{
 pub struct Follower {
     port: u16,
     store: Store,
+    offset: usize,
 }
 
 impl Follower {
     pub fn new(port: u16, store: Store) -> Self {
-        Self { port, store }
+        Self {
+            port,
+            store,
+            offset: 0,
+        }
     }
 
-    pub async fn handle_conn(&self, mut stream: TcpStream) -> Result<()> {
+    pub async fn handle_conn(&mut self, mut stream: TcpStream) -> Result<()> {
         send_ping(&mut stream).await?;
         check_ping_response(&mut stream).await?;
         send_replconf(&mut stream, self.port).await?;
         check_replconf_response(&mut stream).await?;
         send_psync(&mut stream).await?;
-        check_psync_response(&mut stream).await?;
+        self.check_psync_response(&mut stream).await?;
 
         let mut buf = [0; 1024];
         loop {
@@ -45,6 +50,7 @@ impl Follower {
                         None
                     }
                     "get" => server::handle_get(args, &self.store),
+                    "replconf" => self.handle_replconf(),
                     _ => Some(Value::Error("ERR unknown command".into())),
                 };
                 if let Some(response) = response {
@@ -53,6 +59,42 @@ impl Follower {
             }
         }
         Ok(())
+    }
+
+    async fn check_psync_response(&mut self, stream: &mut TcpStream) -> Result<()> {
+        stream.flush().await?;
+
+        let mut buf = [0; 1024];
+        let mut bytes_read = stream.read(&mut buf).await?;
+        let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
+        if let Value::String(res_str) = response {
+            let sync = res_str.split_ascii_whitespace().collect::<Vec<&str>>();
+            if sync.len() < 3 {
+                return Err(anyhow::anyhow!("Unexpected response to PSYNC: {res_str}"));
+            }
+            self.offset = sync.last().unwrap().parse::<usize>()?;
+        } else {
+            return Err(anyhow::anyhow!("Unexpected response to PSYNC"));
+        }
+
+        // verify RDB file
+        let mut rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
+        let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
+        msg_bytes.append(&mut rdb);
+
+        bytes_read = stream.read(&mut buf).await?;
+        if &buf[..bytes_read] != msg_bytes {
+            return Err(anyhow::anyhow!("Unexpected RDB file"));
+        }
+        Ok(())
+    }
+
+    fn handle_replconf(&self) -> Option<Value> {
+        Some(Value::Array(vec![
+            Value::Bulk("REPLCONF".into()),
+            Value::Bulk("ACK".into()),
+            Value::Bulk(self.offset.to_string()),
+        ]))
     }
 }
 
@@ -115,31 +157,5 @@ async fn send_psync(stream: &mut TcpStream) -> Result<()> {
         Value::Bulk("-1".to_string()),
     ]);
     stream.write_all(&psync.encode()).await?;
-    Ok(())
-}
-
-async fn check_psync_response(stream: &mut TcpStream) -> Result<()> {
-    stream.flush().await?;
-
-    let mut buf = [0; 1024];
-    let mut bytes_read = stream.read(&mut buf).await?;
-    let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
-    if let Value::String(res_str) = response {
-        if !res_str.starts_with("FULLRESYNC") {
-            return Err(anyhow::anyhow!("Unexpected response to PSYNC: {res_str}"));
-        }
-    } else {
-        return Err(anyhow::anyhow!("Unexpected response to PSYNC"));
-    }
-
-    // verify RDB file
-    let mut rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
-    let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
-    msg_bytes.append(&mut rdb);
-
-    bytes_read = stream.read(&mut buf).await?;
-    if &buf[..bytes_read] != msg_bytes {
-        return Err(anyhow::anyhow!("Unexpected RDB file"));
-    }
     Ok(())
 }

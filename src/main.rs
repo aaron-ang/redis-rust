@@ -38,7 +38,7 @@ async fn main() -> Result<()> {
 
     let role = if let Some((host, leader_port)) = parse_replica(&cmd_args) {
         let leader_stream = TcpStream::connect(format!("{host}:{leader_port}")).await?;
-        let follower = Follower::new(listening_port, store.clone());
+        let mut follower = Follower::new(listening_port, store.clone());
         tokio::spawn(async move { follower.handle_conn(leader_stream).await.unwrap() });
         ReplicaType::Follower
     } else {

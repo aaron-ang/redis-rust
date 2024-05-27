@@ -5,12 +5,17 @@ mod util;
 
 use anyhow::Result;
 use clap::Parser;
-use tokio::net::{TcpListener, TcpStream};
+use resp::Value;
+use std::sync::Arc;
+use tokio::{
+    net::{TcpListener, TcpStream},
+    sync::broadcast::{self, Sender},
+};
 
 use db::Store;
 use follower::Follower;
 use server::Server;
-use util::Replica;
+use util::ReplicaType;
 
 static PORT: u16 = 6379;
 
@@ -28,14 +33,16 @@ async fn main() -> Result<()> {
     let cmd_args = Args::parse();
     let listening_port = cmd_args.port;
     let store = Store::new();
+    let (tx, _rx): (Sender<Value>, _) = broadcast::channel(16);
+    let tx = Arc::new(tx);
 
     let role = if let Some((host, leader_port)) = parse_replica(&cmd_args) {
         let leader_stream = TcpStream::connect(format!("{host}:{leader_port}")).await?;
         let follower = Follower::new(listening_port, store.clone());
         let _ = tokio::spawn(async move { follower.handle_conn(leader_stream).await });
-        Replica::Follower
+        ReplicaType::Follower
     } else {
-        Replica::Leader
+        ReplicaType::Leader
     };
 
     let listener = TcpListener::bind(format!("127.0.0.1:{listening_port}")).await?;
@@ -44,9 +51,10 @@ async fn main() -> Result<()> {
         println!("Accepted new connection");
 
         let store = store.clone();
+        let tx = tx.clone();
         tokio::spawn(async move {
             let server = Server::new(store, role);
-            server.handle_conn(stream).await;
+            server.handle_conn(stream, tx).await.unwrap();
         });
     }
 }

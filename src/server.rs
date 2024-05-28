@@ -55,7 +55,10 @@ impl Server {
                     "info" => handle_info(self.role),
                     "replconf" => Some(Value::String("OK".into())),
                     "psync" => handle_psync(&mut stream, &mut replication).await,
-                    "wait" => Some(Value::Integer(0)),
+                    "wait" => {
+                        let num_replicas = (tx.receiver_count() - 1) as i64; // ignore first receiver
+                        Some(Value::Integer(num_replicas))
+                    }
                     c => {
                         eprintln!("Unknown command: {}", c);
                         None

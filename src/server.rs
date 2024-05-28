@@ -55,6 +55,7 @@ impl Server {
                     "info" => handle_info(self.role),
                     "replconf" => Some(Value::String("OK".into())),
                     "psync" => handle_psync(&mut stream, &mut replication).await,
+                    "wait" => Some(Value::Integer(0)),
                     c => {
                         eprintln!("Unknown command: {}", c);
                         None

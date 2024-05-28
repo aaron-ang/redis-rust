@@ -4,7 +4,7 @@ use crate::server::{self, EMPTY_RDB_B64};
 use anyhow::Result;
 use base64::prelude::*;
 use resp::{Decoder, Value};
-use std::io::BufReader;
+use std::io::{BufReader, ErrorKind};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -33,27 +33,43 @@ impl Follower {
         send_psync(&mut stream).await?;
         self.check_psync_response(&mut stream).await?;
 
-        let mut buf = [0; 1024];
+        let mut buf = vec![0; 1024];
         loop {
             let bytes_read = stream.read(&mut buf).await?;
             if bytes_read == 0 {
                 eprintln!("Follower disconnected");
                 break;
             }
+            println!(
+                "Follower received: {:?}",
+                String::from_utf8_lossy(&buf[..bytes_read])
+            );
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            while let Some(value) = decoder.decode().ok() {
-                println!("Follower received value: {:?}", value);
-                let (command, args) = server::extract_command(&value).unwrap();
-                match command.to_lowercase().as_str() {
-                    "ping" => continue,
-                    "set" => {
-                        server::handle_set(args, &self.store);
+            loop {
+                match decoder.decode() {
+                    Ok(value) => {
+                        let (command, args) = server::extract_command(&value);
+                        if command == "" {
+                            continue;
+                        }
+                        match command.to_lowercase().as_str() {
+                            "ping" => {}
+                            "set" => {
+                                server::handle_set(args, &self.store);
+                            }
+                            "get" => {
+                                server::handle_get(args, &self.store);
+                            }
+                            "replconf" => self.handle_replconf(&mut stream).await?,
+                            _ => eprintln!("Unknown command: {}", command),
+                        }
+                        self.offset += value.encode().len();
                     }
-                    "get" => {
-                        server::handle_get(args, &self.store);
-                    }
-                    "replconf" => self.handle_replconf(&mut stream).await?,
-                    _ => eprintln!("Unknown command: {}", command),
+                    Err(e) => match e.kind() {
+                        ErrorKind::UnexpectedEof => break,
+                        ErrorKind::InvalidInput => continue,
+                        _ => eprintln!("Error: {:?}", e),
+                    },
                 }
             }
         }
@@ -61,14 +77,9 @@ impl Follower {
     }
 
     async fn check_psync_response(&mut self, stream: &mut TcpStream) -> Result<()> {
-        let mut buf = [0; 1024];
-        let bytes_read = stream.read(&mut buf).await?;
-        println!(
-            "PSYNC response: {:?}",
-            String::from_utf8_lossy(&buf[..bytes_read])
-        );
-
-        let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
+        let mut psync_buf = vec![0; 56]; // length of PSYNC response
+        stream.read_exact(&mut psync_buf).await?;
+        let mut decoder = Decoder::new(BufReader::new(&psync_buf[..]));
         if let Value::String(res_str) = decoder.decode().unwrap() {
             let sync = res_str.split_ascii_whitespace().collect::<Vec<&str>>();
             if sync.len() < 3 || sync[0] != "FULLRESYNC" {
@@ -79,20 +90,20 @@ impl Follower {
             return Err(anyhow::anyhow!("Unexpected response to PSYNC"));
         }
 
+        // verify RDB file
         let mut rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
         let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
         msg_bytes.append(&mut rdb);
-        if bytes_read >= msg_bytes.len() {
-            // verify RDB file
-            let rdb_slice = &buf[bytes_read - msg_bytes.len()..bytes_read];
-            if rdb_slice != msg_bytes.as_slice() {
-                eprintln!("Received RDB: {:?}", String::from_utf8_lossy(rdb_slice));
-                eprintln!(
-                    "Expected RDB: {:?}",
-                    String::from_utf8_lossy(msg_bytes.as_slice())
-                );
-                return Err(anyhow::anyhow!("Unexpected RDB file"));
-            }
+        let mut rdb_buf = vec![0; msg_bytes.len()];
+        stream.read_exact(&mut rdb_buf).await?;
+
+        if rdb_buf != msg_bytes.as_slice() {
+            eprintln!("Received RDB: {:?}", String::from_utf8_lossy(&rdb_buf));
+            eprintln!(
+                "Expected RDB: {:?}",
+                String::from_utf8_lossy(msg_bytes.as_slice())
+            );
+            return Err(anyhow::anyhow!("Unexpected RDB file"));
         }
         Ok(())
     }
@@ -115,7 +126,7 @@ async fn send_ping(stream: &mut TcpStream) -> Result<()> {
 }
 
 async fn check_ping_response(stream: &mut TcpStream) -> Result<()> {
-    let mut buf = [0; 1024];
+    let mut buf = vec![0; 1024];
     let bytes_read = stream.read(&mut buf).await?;
     let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
     match response {
@@ -141,7 +152,7 @@ async fn send_replconf(stream: &mut TcpStream, my_port: u16) -> Result<()> {
 }
 
 async fn check_replconf_response(stream: &mut TcpStream) -> Result<()> {
-    let mut buf = [0; 1024];
+    let mut buf = vec![0; 1024];
     let mut num_ok = 0;
 
     // check that 2 OK's are received

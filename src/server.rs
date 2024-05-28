@@ -28,7 +28,7 @@ impl Server {
 
     pub async fn handle_conn(&self, mut stream: TcpStream, tx: Arc<Sender<Value>>) -> Result<()> {
         let mut replication = false;
-        let mut buf = [0; 1024];
+        let mut buf = vec![0; 1024];
 
         loop {
             let bytes_read = stream.read(&mut buf).await?;
@@ -38,7 +38,7 @@ impl Server {
             }
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Some(value) = decoder.decode().ok() {
-                let (command, args) = extract_command(&value).unwrap();
+                let (command, args) = extract_command(&value);
                 let response = match command.to_lowercase().as_str() {
                     "ping" => Some(Value::String("PONG".into())),
                     "echo" => Some(args.first().unwrap().clone()),
@@ -89,13 +89,13 @@ impl Server {
     }
 }
 
-pub fn extract_command(value: &Value) -> Result<(String, Vec<Value>)> {
+pub fn extract_command(value: &Value) -> (String, Vec<Value>) {
     if let Value::Array(a) = value {
-        let command = unpack_bulk_string(a.first().unwrap())?;
+        let command = unpack_bulk_string(a.first().unwrap()).unwrap();
         let args = a.iter().skip(1).cloned().collect();
-        Ok((command, args))
+        (command, args)
     } else {
-        Err(anyhow::anyhow!("Unexpected command format"))
+        ("".into(), vec![])
     }
 }
 

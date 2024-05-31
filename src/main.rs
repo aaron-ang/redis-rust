@@ -9,13 +9,16 @@ use resp::Value;
 use std::sync::Arc;
 use tokio::{
     net::{TcpListener, TcpStream},
-    sync::broadcast::{self, Sender},
+    sync::{
+        broadcast::{self, Sender},
+        Mutex,
+    },
 };
 
 use db::Store;
 use follower::Follower;
 use server::Server;
-use util::ReplicaType;
+use util::{ReplicaType, ReplicationState};
 
 static PORT: u16 = 6379;
 
@@ -45,15 +48,17 @@ async fn main() -> Result<()> {
         ReplicaType::Leader
     };
 
+    let rep_state = Arc::new(Mutex::new(ReplicationState::new()));
     let listener = TcpListener::bind(format!("127.0.0.1:{listening_port}")).await?;
     loop {
         let (stream, _addr) = listener.accept().await?;
         println!("Accepted new connection");
 
         let store = store.clone();
+        let rep_state = rep_state.clone();
         let tx = tx.clone();
         tokio::spawn(async move {
-            let server = Server::new(store, role);
+            let mut server = Server::new(store, role, rep_state);
             server.handle_conn(stream, tx).await.unwrap()
         });
     }

@@ -1,5 +1,5 @@
 use crate::db::Store;
-use crate::ReplicaType;
+use crate::util::{ReplicaType, ReplicationState};
 
 use anyhow::Result;
 use base64::prelude::*;
@@ -8,8 +8,11 @@ use std::{io::BufReader, sync::Arc, time::SystemTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::broadcast::{error::RecvError, Sender},
-    time::Duration,
+    sync::{
+        broadcast::{error::RecvError, Sender},
+        Mutex,
+    },
+    time::{sleep, timeout, Duration, Instant},
 };
 
 pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
@@ -19,14 +22,23 @@ pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJ
 pub struct Server {
     store: Store,
     role: ReplicaType,
+    rep_state: Arc<Mutex<ReplicationState>>,
 }
 
 impl Server {
-    pub fn new(store: Store, role: ReplicaType) -> Self {
-        Self { store, role }
+    pub fn new(store: Store, role: ReplicaType, rep_state: Arc<Mutex<ReplicationState>>) -> Self {
+        Self {
+            store,
+            role,
+            rep_state,
+        }
     }
 
-    pub async fn handle_conn(&self, mut stream: TcpStream, tx: Arc<Sender<Value>>) -> Result<()> {
+    pub async fn handle_conn(
+        &mut self,
+        mut stream: TcpStream,
+        tx: Arc<Sender<Value>>,
+    ) -> Result<()> {
         let mut replication = false;
         let mut buf = vec![0; 1024];
 
@@ -45,7 +57,7 @@ impl Server {
                     "set" => {
                         let r = handle_set(args, &self.store);
                         if r.is_some() && self.role == ReplicaType::Leader {
-                            tx.send(value).unwrap();
+                            tx.send(value.clone()).unwrap();
                             r
                         } else {
                             None
@@ -55,10 +67,7 @@ impl Server {
                     "info" => handle_info(self.role),
                     "replconf" => Some(Value::String("OK".into())),
                     "psync" => handle_psync(&mut stream, &mut replication).await,
-                    "wait" => {
-                        let num_replicas = (tx.receiver_count() - 1) as i64; // ignore first receiver
-                        Some(Value::Integer(num_replicas))
-                    }
+                    "wait" => self.handle_wait(&args, &tx).await,
                     c => {
                         eprintln!("Unknown command: {}", c);
                         None
@@ -67,6 +76,7 @@ impl Server {
                 if let Some(r) = response {
                     stream.write_all(&r.encode()).await?;
                 }
+                self.rep_state.lock().await.set_prev_client_cmd(command);
             }
 
             if replication {
@@ -86,10 +96,65 @@ impl Server {
                             }
                         },
                     }
+
+                    let mut buf = vec![0; 1024];
+                    if let Ok(bytes_read) =
+                        timeout(Duration::from_millis(100), stream.read(&mut buf)).await
+                    {
+                        let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
+                        let mut rep_state = self.rep_state.lock().await;
+                        while let Some(_) = decoder.decode().ok() {
+                            rep_state.incr_num_ack();
+                        }
+                    }
                 }
             }
         }
         Ok(())
+    }
+
+    async fn handle_wait(&mut self, args: &Vec<Value>, tx: &Arc<Sender<Value>>) -> Option<Value> {
+        if args.len() < 2 {
+            return None;
+        }
+        let limit = unpack_bulk_string(&args[0])
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let timeout = unpack_bulk_string(&args[1])
+            .unwrap()
+            .parse::<u64>()
+            .unwrap();
+
+        if limit <= 0 {
+            return Some(Value::Integer((tx.receiver_count() - 1) as i64)); // ignore first receiver
+        }
+
+        if self.rep_state.lock().await.get_prev_client_cmd() != "set" {
+            sleep(Duration::from_millis(timeout)).await;
+            Some(Value::Integer((tx.receiver_count() - 1) as i64)) // ignore first receiver
+        } else {
+            let repl_getack = Value::Array(vec![
+                Value::Bulk("REPLCONF".into()),
+                Value::Bulk("GETACK".into()),
+                Value::Bulk("*".into()),
+            ]);
+            tx.send(repl_getack).unwrap();
+            let end = Instant::now() + Duration::from_millis(timeout);
+            let num_ack = loop {
+                let rep_state = self.rep_state.lock().await;
+                let num_ack = rep_state.get_num_ack();
+                if Instant::now() >= end || num_ack >= limit {
+                    break num_ack;
+                }
+                drop(rep_state);
+                sleep(Duration::from_millis(100)).await;
+            };
+            let mut rep_state = self.rep_state.lock().await;
+            rep_state.reset_num_ack();
+            rep_state.set_prev_client_cmd("".into());
+            Some(Value::Integer(num_ack as i64)) // ignore first receiver
+        }
     }
 }
 
@@ -99,7 +164,7 @@ pub fn extract_command(value: &Value) -> (String, Vec<Value>) {
         let args = a.iter().skip(1).cloned().collect();
         (command, args)
     } else {
-        ("".into(), vec![])
+        (String::new(), vec![])
     }
 }
 

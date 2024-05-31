@@ -40,16 +40,12 @@ impl Follower {
                 eprintln!("Follower disconnected");
                 break;
             }
-            println!(
-                "Follower received: {:?}",
-                String::from_utf8_lossy(&buf[..bytes_read])
-            );
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             loop {
                 match decoder.decode() {
                     Ok(value) => {
                         let (command, args) = server::extract_command(&value);
-                        if command == "" {
+                        if command.is_empty() {
                             continue;
                         }
                         match command.to_lowercase().as_str() {

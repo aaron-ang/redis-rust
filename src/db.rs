@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, RwLock},
     time::SystemTime,
 };
 
@@ -8,22 +8,25 @@ struct RedisData {
     value: String,
     expiry: Option<SystemTime>,
 }
+
 #[derive(Clone)]
 pub struct Store {
-    storage: Arc<Mutex<HashMap<String, RedisData>>>,
+    storage: Arc<RwLock<HashMap<String, RedisData>>>,
 }
+
 impl Store {
     pub fn new() -> Self {
         Store {
-            storage: Arc::new(Mutex::new(HashMap::new())),
+            storage: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        let mut storage = self.storage.lock().unwrap();
+        let storage = self.storage.read().unwrap();
         if let Some(data) = storage.get(key) {
             if let Some(expiry) = data.expiry {
                 if expiry < SystemTime::now() {
+                    let mut storage = self.storage.write().unwrap();
                     storage.remove(key);
                     return None;
                 }
@@ -35,7 +38,7 @@ impl Store {
     }
 
     pub fn set(&self, key: String, value: String, expiry: Option<SystemTime>) {
-        let mut storage = self.storage.lock().unwrap();
+        let mut storage = self.storage.write().unwrap();
         storage.insert(key, RedisData { value, expiry });
     }
 }

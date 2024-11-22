@@ -1,5 +1,6 @@
 use crate::db::Store;
 use crate::server::{self, EMPTY_RDB_B64};
+use crate::util::Command;
 
 use anyhow::Result;
 use base64::prelude::*;
@@ -44,22 +45,20 @@ impl Follower {
             loop {
                 match decoder.decode() {
                     Ok(value) => {
-                        let (command, args) = server::extract_command(&value);
-                        if command.is_empty() {
-                            continue;
-                        }
-                        match command.to_lowercase().as_str() {
-                            "ping" => {}
-                            "set" => {
-                                server::handle_set(args, &self.store);
+                        if let Ok((command, args)) = server::extract_command(&value) {
+                            match command {
+                                Command::PING => {}
+                                Command::SET => {
+                                    server::handle_set(args, &self.store);
+                                }
+                                Command::GET => {
+                                    server::handle_get(args, &self.store);
+                                }
+                                Command::REPLCONF => self.handle_replconf(&mut stream).await?,
+                                _ => eprintln!("Unknown command: {}", command),
                             }
-                            "get" => {
-                                server::handle_get(args, &self.store);
-                            }
-                            "replconf" => self.handle_replconf(&mut stream).await?,
-                            _ => eprintln!("Unknown command: {}", command),
+                            self.offset += value.encode().len();
                         }
-                        self.offset += value.encode().len();
                     }
                     Err(e) => match e.kind() {
                         ErrorKind::UnexpectedEof => break,

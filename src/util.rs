@@ -1,4 +1,18 @@
 use std::fmt;
+use strum::{Display, EnumString};
+
+#[derive(Clone, Copy, Display, EnumString, PartialEq)]
+pub enum Command {
+    PING,
+    ECHO,
+    SET,
+    GET,
+    INFO,
+    REPLCONF,
+    PSYNC,
+    WAIT,
+    CONFIG,
+}
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum ReplicaType {
@@ -17,14 +31,14 @@ impl fmt::Display for ReplicaType {
 
 pub struct ReplicationState {
     num_ack: usize,
-    prev_client_cmd: String,
+    prev_client_cmd: Option<Command>,
 }
 
 impl ReplicationState {
     pub fn new() -> Self {
         Self {
             num_ack: 0,
-            prev_client_cmd: String::new(),
+            prev_client_cmd: None,
         }
     }
 
@@ -40,11 +54,11 @@ impl ReplicationState {
         self.num_ack = 0;
     }
 
-    pub fn get_prev_client_cmd(&self) -> String {
-        self.prev_client_cmd.clone()
+    pub fn get_prev_client_cmd(&self) -> Option<Command> {
+        self.prev_client_cmd
     }
 
-    pub fn set_prev_client_cmd(&mut self, cmd: String) {
-        self.prev_client_cmd = cmd.to_lowercase();
+    pub fn set_prev_client_cmd(&mut self, cmd: Option<Command>) {
+        self.prev_client_cmd = cmd;
     }
 }

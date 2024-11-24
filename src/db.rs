@@ -50,12 +50,7 @@ impl Store {
                 let file = fs::File::open(&path).await?;
                 let instance = Instance::new(file).await?;
                 // get first database
-                let db = instance
-                    .dbs
-                    .values()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("No database found"))?;
-
+                let db = instance.get_db(0)?;
                 Ok(db.clone())
             }
             _ => Ok(Self::new_with_entries(HashMap::new())),

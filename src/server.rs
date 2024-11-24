@@ -1,17 +1,15 @@
+use crate::config::Config;
 use crate::db::Store;
-use crate::util::{ReplicaType, ReplicationState};
+use crate::util::{Command, ReplicaType};
 
 use anyhow::Result;
 use base64::prelude::*;
 use resp::{Decoder, Value};
-use std::{io::BufReader, sync::Arc, time::SystemTime};
+use std::{io::BufReader, str::FromStr, time::SystemTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{
-        broadcast::{error::RecvError, Sender},
-        Mutex,
-    },
+    sync::broadcast::error::RecvError,
     time::{sleep, timeout, Duration, Instant},
 };
 
@@ -20,71 +18,42 @@ pub const REPL_OFFSET: usize = 0;
 pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
 
 pub struct Server {
-    store: Store,
-    role: ReplicaType,
-    rep_state: Arc<Mutex<ReplicationState>>,
+    config: Config,
+    replication: bool,
+    stream: TcpStream,
 }
 
 impl Server {
-    pub fn new(store: Store, role: ReplicaType, rep_state: Arc<Mutex<ReplicationState>>) -> Self {
-        Self {
-            store,
-            role,
-            rep_state,
+    pub fn new(config: Config, stream: TcpStream) -> Self {
+        Server {
+            config,
+            replication: false,
+            stream,
         }
     }
 
-    pub async fn handle_conn(
-        &mut self,
-        mut stream: TcpStream,
-        tx: Arc<Sender<Value>>,
-    ) -> Result<()> {
-        let mut replication = false;
+    pub async fn handle_conn(&mut self) -> Result<()> {
         let mut buf = vec![0; 1024];
 
         loop {
-            let bytes_read = stream.read(&mut buf).await?;
+            let bytes_read = self.stream.read(&mut buf).await?;
             if bytes_read == 0 {
                 eprintln!("Client disconnected");
                 break;
             }
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            while let Some(value) = decoder.decode().ok() {
-                let (command, args) = extract_command(&value);
-                let response = match command.to_lowercase().as_str() {
-                    "ping" => Some(Value::String("PONG".into())),
-                    "echo" => Some(args.first().unwrap().clone()),
-                    "set" => {
-                        let r = handle_set(args, &self.store);
-                        if r.is_some() && self.role == ReplicaType::Leader {
-                            tx.send(value.clone()).unwrap();
-                            r
-                        } else {
-                            None
-                        }
-                    }
-                    "get" => handle_get(args, &self.store),
-                    "info" => handle_info(self.role),
-                    "replconf" => Some(Value::String("OK".into())),
-                    "psync" => handle_psync(&mut stream, &mut replication).await,
-                    "wait" => self.handle_wait(&args, &tx).await,
-                    c => {
-                        eprintln!("Unknown command: {}", c);
-                        None
-                    }
-                };
-                if let Some(r) = response {
-                    stream.write_all(&r.encode()).await?;
+            while let Some(cmd_line) = decoder.decode().ok() {
+                if let Some(response) = self.execute(&cmd_line).await? {
+                    self.stream.write_all(&response.encode()).await?;
                 }
-                self.rep_state.lock().await.set_prev_client_cmd(command);
             }
 
-            if replication {
-                let mut rx = tx.subscribe();
+            if self.replication {
+                let mut rx = self.config.tx.subscribe();
                 loop {
                     match rx.recv().await {
                         Ok(v) => {
-                            stream.write_all(&v.encode()).await?;
+                            self.stream.write_all(&v.encode()).await?;
                         }
                         Err(e) => match e {
                             RecvError::Closed => {
@@ -96,14 +65,13 @@ impl Server {
                             }
                         },
                     }
-
                     let mut buf = vec![0; 1024];
                     if let Ok(bytes_read) =
-                        timeout(Duration::from_millis(100), stream.read(&mut buf)).await
+                        timeout(Duration::from_millis(100), self.stream.read(&mut buf)).await
                     {
                         let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
-                        let mut rep_state = self.rep_state.lock().await;
                         while let Some(_) = decoder.decode().ok() {
+                            let mut rep_state = self.config.rep_state.write().await;
                             rep_state.incr_num_ack();
                         }
                     }
@@ -113,124 +81,192 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_wait(&mut self, args: &Vec<Value>, tx: &Arc<Sender<Value>>) -> Option<Value> {
+    pub async fn execute(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
+        let (command, args) = extract_command(&cmd_line)?;
+        let response = match command {
+            Command::PING => Some(Value::String("PONG".into())),
+            Command::ECHO => {
+                if args.is_empty() {
+                    None
+                } else {
+                    Some(args[0].clone())
+                }
+            }
+            Command::SET => {
+                let resp = handle_set(args, &self.config.store)?;
+                if self.config.role == ReplicaType::Leader {
+                    let _ = self.config.tx.send(cmd_line.clone());
+                }
+                Some(resp)
+            }
+            Command::GET => handle_get(args, &self.config.store)?,
+            Command::INFO => handle_info(&self.config.role),
+            Command::REPLCONF => Some(Value::String("OK".into())),
+            Command::PSYNC => {
+                self.handle_psync().await?;
+                None
+            }
+            Command::WAIT => self.handle_wait(&args).await?,
+            Command::CONFIG => self.handle_config(args)?,
+        };
+
+        self.config
+            .rep_state
+            .write()
+            .await
+            .set_prev_client_cmd(Some(command));
+
+        Ok(response)
+    }
+
+    async fn handle_psync(&mut self) -> Result<()> {
+        let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
+        self.stream.write_all(&msg.encode()).await?;
+
+        let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
+        self.stream
+            .write(format!("${}\r\n", rdb.len()).as_bytes())
+            .await?;
+        self.stream.write_all(&rdb).await?;
+        self.stream.flush().await?;
+        self.replication = true;
+        Ok(())
+    }
+
+    async fn handle_wait(&mut self, args: &Vec<Value>) -> Result<Option<Value>> {
         if args.len() < 2 {
-            return None;
+            return Ok(None);
         }
-        let limit = unpack_bulk_string(&args[0])
-            .unwrap()
-            .parse::<usize>()
-            .unwrap();
-        let timeout = unpack_bulk_string(&args[1])
-            .unwrap()
-            .parse::<u64>()
-            .unwrap();
+        let limit = unpack_bulk_string(&args[0])?.parse::<usize>()?;
+        let timeout = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
         if limit <= 0 {
-            return Some(Value::Integer((tx.receiver_count() - 1) as i64)); // ignore first receiver
+            return Ok(Some(Value::Integer(self.num_followers() as i64)));
         }
 
-        if self.rep_state.lock().await.get_prev_client_cmd() != "set" {
-            sleep(Duration::from_millis(timeout)).await;
-            Some(Value::Integer((tx.receiver_count() - 1) as i64)) // ignore first receiver
-        } else {
-            let repl_getack = Value::Array(vec![
-                Value::Bulk("REPLCONF".into()),
-                Value::Bulk("GETACK".into()),
-                Value::Bulk("*".into()),
-            ]);
-            tx.send(repl_getack).unwrap();
-            let end = Instant::now() + Duration::from_millis(timeout);
-            let num_ack = loop {
-                let rep_state = self.rep_state.lock().await;
-                let num_ack = rep_state.get_num_ack();
-                if Instant::now() >= end || num_ack >= limit {
-                    break num_ack;
-                }
-                drop(rep_state);
-                sleep(Duration::from_millis(100)).await;
+        let responded =
+            if self.config.rep_state.read().await.get_prev_client_cmd() != Some(Command::SET) {
+                sleep(Duration::from_millis(timeout)).await;
+                self.num_followers()
+            } else {
+                let repl_getack = Value::Array(vec![
+                    Value::Bulk("REPLCONF".into()),
+                    Value::Bulk("GETACK".into()),
+                    Value::Bulk("*".into()),
+                ]);
+                self.config.tx.send(repl_getack)?;
+                let end = Instant::now() + Duration::from_millis(timeout);
+                let num_ack = loop {
+                    {
+                        let rep_state = self.config.rep_state.read().await;
+                        let num_ack = rep_state.get_num_ack();
+                        if Instant::now() >= end || num_ack >= limit {
+                            break num_ack;
+                        }
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                };
+                let mut rep_state = self.config.rep_state.write().await;
+                rep_state.reset_num_ack();
+                rep_state.set_prev_client_cmd(None);
+                num_ack
             };
-            let mut rep_state = self.rep_state.lock().await;
-            rep_state.reset_num_ack();
-            rep_state.set_prev_client_cmd("".into());
-            Some(Value::Integer(num_ack as i64)) // ignore first receiver
+
+        Ok(Some(Value::Integer(responded as i64)))
+    }
+
+    fn handle_config(&self, args: Vec<Value>) -> Result<Option<Value>> {
+        if args.len() < 2 {
+            return Ok(None);
         }
+
+        let cmd = unpack_bulk_string(&args[0])?;
+        let cmd = Command::from_str(&cmd)?;
+        let res = match cmd {
+            Command::GET => {
+                let name = unpack_bulk_string(&args[1])?;
+                let value = match name.to_lowercase().as_str() {
+                    "dir" => Value::Bulk(
+                        self.config
+                            .dir
+                            .clone()
+                            .into_os_string()
+                            .into_string()
+                            .unwrap_or_default(),
+                    ),
+                    "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
+                    _ => anyhow::bail!("Invalid CONFIG option"),
+                };
+                Some(Value::Array(vec![Value::Bulk(name), value]))
+            }
+            _ => None,
+        };
+        Ok(res)
+    }
+
+    fn num_followers(&self) -> usize {
+        self.config.tx.receiver_count()
     }
 }
 
-pub fn extract_command(value: &Value) -> (String, Vec<Value>) {
+pub fn extract_command(value: &Value) -> Result<(Command, Vec<Value>)> {
     if let Value::Array(a) = value {
-        let command = unpack_bulk_string(a.first().unwrap()).unwrap();
-        let args = a.iter().skip(1).cloned().collect();
-        (command, args)
+        let command_str = unpack_bulk_string(&a[0])?;
+        let command = Command::from_str(&command_str)?;
+        let args = a[1..].to_vec();
+        Ok((command, args))
     } else {
-        (String::new(), vec![])
+        anyhow::bail!("Expected array value")
     }
 }
 
 fn unpack_bulk_string(value: &Value) -> Result<String> {
     if let Value::Bulk(s) = value {
-        Ok(s.into())
+        Ok(s.clone())
     } else {
-        Err(anyhow::anyhow!("Expected command to be bulk string"))
+        anyhow::bail!("Expected bulk string")
     }
 }
 
-pub fn handle_set(args: Vec<Value>, store: &Store) -> Option<Value> {
+pub fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        return None;
+        anyhow::bail!("SET command requires at least 2 arguments");
     }
 
-    let mut iter = args.into_iter();
-    let key = unpack_bulk_string(&iter.next().unwrap()).unwrap();
-    let value = unpack_bulk_string(&iter.next().unwrap()).unwrap();
+    let key = unpack_bulk_string(&args[0])?;
+    let value = unpack_bulk_string(&args[1])?;
     let mut expiry: Option<SystemTime> = None;
 
-    if let Some(Value::Bulk(option)) = iter.next() {
+    if let Some(Value::Bulk(option)) = args.get(2) {
         match option.to_lowercase().as_str() {
             "px" => {
-                let ms = match iter.next() {
+                let ms = match args.get(3) {
                     Some(Value::Bulk(arg)) => arg.parse::<u64>().unwrap_or(0),
-                    _ => return None,
+                    _ => anyhow::bail!("Invalid PX option"),
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
-            _ => return None,
+            _ => anyhow::bail!("Invalid SET option"),
         }
     }
 
     store.set(key, value, expiry);
-    Some(Value::String("OK".into()))
+    Ok(Value::String("OK".into()))
 }
 
-pub fn handle_get(args: Vec<Value>, store: &Store) -> Option<Value> {
-    if args.len() < 1 {
-        return Some(Value::Null);
+pub fn handle_get(args: Vec<Value>, store: &Store) -> Result<Option<Value>> {
+    if args.is_empty() {
+        anyhow::bail!("GET command requires at least 1 argument");
     }
-    let key = unpack_bulk_string(&args[0]).unwrap();
-    store
+    let key = unpack_bulk_string(&args[0])?;
+    Ok(store
         .get(&key)
         .map(|v| Value::Bulk(v))
-        .or(Some(Value::Null))
+        .or(Some(Value::Null)))
 }
 
-fn handle_info(role: ReplicaType) -> Option<Value> {
+fn handle_info(role: &ReplicaType) -> Option<Value> {
     let value =
         format!("role:{role}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}");
     Some(Value::Bulk(value))
-}
-
-async fn handle_psync(stream: &mut TcpStream, replication: &mut bool) -> Option<Value> {
-    let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
-    stream.write_all(&msg.encode()).await.unwrap();
-
-    let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
-    stream
-        .write(format!("${}\r\n", rdb.len()).as_bytes())
-        .await
-        .unwrap();
-    stream.write_all(&rdb).await.unwrap();
-    stream.flush().await.unwrap();
-    *replication = true;
-    None
 }

@@ -8,4 +8,4 @@ pub use config::Config;
 pub use db::Store;
 pub use follower::Follower;
 pub use server::Server;
-pub use util::{ReplicaType, ReplicationState};
+pub use util::ReplicaType;

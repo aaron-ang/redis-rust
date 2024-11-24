@@ -3,6 +3,7 @@ use clap::Parser;
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
+    sync::Arc,
 };
 use tokio::net::{TcpListener, TcpStream};
 
@@ -59,7 +60,7 @@ fn parse_replica(cmd_args: &Args) -> Option<(String, u16)> {
 }
 
 async fn config_init(cmd_args: Args) -> Result<Config> {
-    let store = Store::new();
+    let store = Arc::new(Store::from_path(&cmd_args.dir, &cmd_args.dbfilename).await?);
     let role = if let Some((host, leader_port)) = parse_replica(&cmd_args) {
         let leader_stream = TcpStream::connect(format!("{host}:{leader_port}")).await?;
         let mut follower = Follower::new(cmd_args.port, store.clone(), leader_stream);

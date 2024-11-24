@@ -71,8 +71,7 @@ impl Server {
                     {
                         let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
                         while let Some(_) = decoder.decode().ok() {
-                            let mut rep_state = self.config.rep_state.write().await;
-                            rep_state.incr_num_ack();
+                            self.config.rep_state.incr_num_ack().await;
                         }
                     }
                 }
@@ -108,13 +107,13 @@ impl Server {
             }
             Command::WAIT => self.handle_wait(&args).await?,
             Command::CONFIG => self.handle_config(args)?,
+            Command::KEYS => self.handle_keys(args)?,
         };
 
         self.config
             .rep_state
-            .write()
-            .await
-            .set_prev_client_cmd(Some(command));
+            .set_prev_client_cmd(Some(command))
+            .await;
 
         Ok(response)
     }
@@ -144,33 +143,33 @@ impl Server {
             return Ok(Some(Value::Integer(self.num_followers() as i64)));
         }
 
-        let responded =
-            if self.config.rep_state.read().await.get_prev_client_cmd() != Some(Command::SET) {
-                sleep(Duration::from_millis(timeout)).await;
-                self.num_followers()
-            } else {
-                let repl_getack = Value::Array(vec![
-                    Value::Bulk("REPLCONF".into()),
-                    Value::Bulk("GETACK".into()),
-                    Value::Bulk("*".into()),
-                ]);
-                self.config.tx.send(repl_getack)?;
-                let end = Instant::now() + Duration::from_millis(timeout);
-                let num_ack = loop {
-                    {
-                        let rep_state = self.config.rep_state.read().await;
-                        let num_ack = rep_state.get_num_ack();
-                        if Instant::now() >= end || num_ack >= limit {
-                            break num_ack;
-                        }
-                    }
-                    sleep(Duration::from_millis(100)).await;
-                };
-                let mut rep_state = self.config.rep_state.write().await;
-                rep_state.reset_num_ack();
-                rep_state.set_prev_client_cmd(None);
-                num_ack
+        let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::SET) {
+            // If last command wasn't SET, just sleep for timeout duration
+            sleep(Duration::from_millis(timeout)).await;
+            self.num_followers()
+        } else {
+            // Get acknowledgements from followers
+            let repl_getack = Value::Array(vec![
+                Value::Bulk("REPLCONF".into()),
+                Value::Bulk("GETACK".into()),
+                Value::Bulk("*".into()),
+            ]);
+            self.config.tx.send(repl_getack)?;
+
+            // Wait until either timeout or we get enough acknowledgements
+            let end = Instant::now() + Duration::from_millis(timeout);
+            let num_ack = loop {
+                let curr_acks = self.config.rep_state.get_num_ack().await;
+                if Instant::now() >= end || curr_acks >= limit {
+                    break curr_acks;
+                }
+                sleep(Duration::from_millis(100)).await;
             };
+
+            // Reset state
+            self.config.rep_state.reset().await;
+            num_ack
+        };
 
         Ok(Some(Value::Integer(responded as i64)))
     }
@@ -201,6 +200,17 @@ impl Server {
             }
             _ => None,
         };
+        Ok(res)
+    }
+
+    fn handle_keys(&self, args: Vec<Value>) -> Result<Option<Value>> {
+        if args.len() != 1 {
+            anyhow::bail!("Wrong number of arguments for KEYS command");
+        }
+
+        let pattern = unpack_bulk_string(&args[0])?;
+        let keys = self.config.store.keys(&pattern)?;
+        let res = Some(Value::Array(keys.into_iter().map(Value::Bulk).collect()));
         Ok(res)
     }
 

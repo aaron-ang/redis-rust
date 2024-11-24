@@ -6,6 +6,7 @@ use anyhow::Result;
 use base64::prelude::*;
 use resp::{Decoder, Value};
 use std::io::{BufReader, ErrorKind};
+use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -13,13 +14,13 @@ use tokio::{
 
 pub struct Follower {
     port: u16,
-    store: Store,
+    store: Arc<Store>,
     leader_stream: TcpStream,
     offset: usize,
 }
 
 impl Follower {
-    pub fn new(port: u16, store: Store, leader_stream: TcpStream) -> Self {
+    pub fn new(port: u16, store: Arc<Store>, leader_stream: TcpStream) -> Self {
         Self {
             port,
             store,

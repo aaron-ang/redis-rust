@@ -135,6 +135,10 @@ impl Instance {
                             _ => anyhow::bail!("Invalid type flag: {}", type_flag),
                         }
 
+                        if expires_on.is_some() {
+                            let _value_type = buf.read_u8().await?;
+                        }
+
                         let key = read_string(&mut buf).await?;
                         let value = read_string(&mut buf).await?;
 

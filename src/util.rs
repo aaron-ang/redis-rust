@@ -1,7 +1,6 @@
-use std::fmt;
 use strum::{Display, EnumString};
 
-#[derive(Clone, Copy, Display, EnumString, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Display, EnumString)]
 pub enum Command {
     PING,
     ECHO,
@@ -14,19 +13,12 @@ pub enum Command {
     CONFIG,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Display)]
 pub enum ReplicaType {
+    #[strum(serialize = "master")]
     Leader,
+    #[strum(serialize = "slave")]
     Follower,
-}
-
-impl fmt::Display for ReplicaType {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            ReplicaType::Leader => write!(f, "master"),
-            ReplicaType::Follower => write!(f, "slave"),
-        }
-    }
 }
 
 pub struct ReplicationState {

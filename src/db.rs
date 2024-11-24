@@ -22,19 +22,19 @@ impl Store {
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        let storage = self.storage.read().unwrap();
-        if let Some(data) = storage.get(key) {
+        let storage_read = self.storage.read().unwrap();
+        if let Some(data) = storage_read.get(key) {
             if let Some(expiry) = data.expiry {
                 if expiry < SystemTime::now() {
-                    let mut storage = self.storage.write().unwrap();
-                    storage.remove(key);
+                    drop(storage_read); // drop the read lock before acquiring the write lock
+                    let mut storage_write = self.storage.write().unwrap();
+                    storage_write.remove(key);
                     return None;
                 }
             }
-            Some(data.value.clone())
-        } else {
-            None
+            return Some(data.value.clone());
         }
+        None
     }
 
     pub fn set(&self, key: String, value: String, expiry: Option<SystemTime>) {

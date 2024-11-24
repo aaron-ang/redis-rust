@@ -20,6 +20,7 @@ pub enum Command {
     WAIT,
     CONFIG,
     KEYS,
+    TYPE,
 }
 
 #[derive(Clone, Copy, PartialEq, Display)]

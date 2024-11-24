@@ -108,6 +108,7 @@ impl Server {
             Command::WAIT => self.handle_wait(&args).await?,
             Command::CONFIG => self.handle_config(args)?,
             Command::KEYS => self.handle_keys(args)?,
+            Command::TYPE => self.handle_type(args)?,
         };
 
         self.config
@@ -211,6 +212,20 @@ impl Server {
         let pattern = unpack_bulk_string(&args[0])?;
         let keys = self.config.store.keys(&pattern)?;
         let res = Some(Value::Array(keys.into_iter().map(Value::Bulk).collect()));
+        Ok(res)
+    }
+
+    fn handle_type(&self, args: Vec<Value>) -> Result<Option<Value>> {
+        if args.len() != 1 {
+            anyhow::bail!("Wrong number of arguments for TYPE command");
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let value = self.config.store.get(&key);
+        let res = match value {
+            Some(_) => Some(Value::Bulk("string".into())),
+            None => Some(Value::Bulk("none".into())),
+        };
         Ok(res)
     }
 

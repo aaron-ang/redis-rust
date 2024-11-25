@@ -99,7 +99,21 @@ impl StreamEntryId {
         Self { ts_ms, seq_no }
     }
 
-    pub fn parse(s: &str) -> Result<Self> {
+    pub fn parse_start_range(s: &str) -> Result<Self> {
+        match s {
+            "-" => Ok(Self::default()),
+            _ => Self::parse_range(s),
+        }
+    }
+
+    pub fn parse_end_range(s: &str) -> Result<Self> {
+        match s {
+            "+" => Ok(Self::max()),
+            _ => Self::parse_range(s),
+        }
+    }
+
+    fn parse_range(s: &str) -> Result<Self> {
         match s.split_once('-') {
             Some((ts_ms_str, seq_no_str)) => Ok(Self {
                 ts_ms: ts_ms_str.parse()?,
@@ -107,6 +121,10 @@ impl StreamEntryId {
             }),
             None => Ok(Self::new(s.parse()?, 0)),
         }
+    }
+
+    fn max() -> Self {
+        Self::new(u128::MAX, u64::MAX)
     }
 }
 

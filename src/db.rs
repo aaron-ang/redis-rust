@@ -143,8 +143,8 @@ impl Store {
             .get(key)
             .ok_or_else(|| anyhow::anyhow!("ERR no such key"))?;
 
-        let start = StreamEntryId::parse(start)?;
-        let end = StreamEntryId::parse(end)?;
+        let start = StreamEntryId::parse_start_range(start)?;
+        let end = StreamEntryId::parse_end_range(end)?;
 
         if let RecordType::Stream(stream) = &stream_data.record {
             Ok(stream.xrange(start, end))

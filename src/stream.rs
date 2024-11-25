@@ -1,5 +1,5 @@
 use anyhow::Result;
-use std::{collections::HashMap, str::FromStr};
+use std::{collections::HashMap, str::FromStr, time::SystemTime};
 
 #[derive(Clone)]
 pub struct StreamRecord {
@@ -29,22 +29,33 @@ impl StreamRecord {
     }
 
     fn generate_entry_id(&self, entry_id: &str) -> Result<StreamEntryId> {
+        if entry_id == "*" {
+            let ts_ms = SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)?
+                .as_millis();
+            let seq_num = match ts_ms.cmp(&self.top_entry_id.ts_ms) {
+                std::cmp::Ordering::Less => todo!(),
+                std::cmp::Ordering::Equal => self.top_entry_id.seq_no + 1,
+                std::cmp::Ordering::Greater => 0,
+            };
+            return Ok(StreamEntryId::new(ts_ms, seq_num));
+        }
+
         let (ts_str, seq_no_str) = entry_id
             .split_once('-')
             .ok_or_else(|| anyhow::anyhow!("Invalid entry ID format"))?;
 
-        let ts_ms = ts_str.parse::<u64>()?;
-        match seq_no_str {
-            "*" => {
-                if ts_ms < self.top_entry_id.ts_ms {
-                    anyhow::bail!("ERR The ID specified in XADD must be greater than the last one");
-                } else if ts_ms == self.top_entry_id.ts_ms {
-                    Ok(StreamEntryId::new(ts_ms, self.top_entry_id.seq_no + 1))
-                } else {
-                    Ok(StreamEntryId::new(ts_ms, 0))
-                }
+        if seq_no_str == "*" {
+            let ts_ms = ts_str.parse::<u128>()?;
+            if ts_ms < self.top_entry_id.ts_ms {
+                anyhow::bail!("ERR The ID specified in XADD must be greater than the last one");
+            } else if ts_ms == self.top_entry_id.ts_ms {
+                Ok(StreamEntryId::new(ts_ms, self.top_entry_id.seq_no + 1))
+            } else {
+                Ok(StreamEntryId::new(ts_ms, 0))
             }
-            _ => entry_id.parse().map_err(anyhow::Error::from),
+        } else {
+            entry_id.parse().map_err(anyhow::Error::from)
         }
     }
 
@@ -64,12 +75,12 @@ impl StreamRecord {
 
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd)]
 pub struct StreamEntryId {
-    ts_ms: u64,
+    ts_ms: u128,
     seq_no: u64,
 }
 
 impl StreamEntryId {
-    fn new(ts_ms: u64, seq_no: u64) -> Self {
+    fn new(ts_ms: u128, seq_no: u64) -> Self {
         Self { ts_ms, seq_no }
     }
 }

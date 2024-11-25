@@ -236,25 +236,24 @@ impl Server {
 
         let values = args[2..]
             .chunks(2)
-            .map(|pair| {
-                if let [field, value] = pair {
-                    Ok((
-                        unpack_bulk_string(field)?.to_string(),
-                        unpack_bulk_string(value)?.to_string(),
-                    ))
-                } else {
-                    bail!("Incorrect key-value pairs format.")
-                }
+            .map(|pair| match pair {
+                [field, value] => Ok((
+                    unpack_bulk_string(field)?.to_string(),
+                    unpack_bulk_string(value)?.to_string(),
+                )),
+                _ => bail!("Incorrect key-value pairs format."),
             })
             .collect::<Result<HashMap<_, _>>>()?;
 
-        let stream_entry_id = self
+        match self
             .config
             .store
             .add_stream_entry(key, entry_id, values)
-            .await?;
-
-        Ok(Value::Bulk(stream_entry_id.to_string()))
+            .await
+        {
+            Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
+            Err(e) => Ok(Value::Error(e.to_string())),
+        }
     }
 
     fn num_followers(&self) -> usize {

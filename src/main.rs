@@ -31,7 +31,23 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let config = setup_config().await?;
-    start_server(config).await
+
+    let addr = SocketAddrV4::new(LOCALHOST, config.port);
+    let listener = TcpListener::bind(addr).await?;
+
+    println!("Server listening on {addr}");
+
+    loop {
+        let (stream, addr) = listener.accept().await?;
+        let config = config.clone();
+        println!("Accepted new connection from {addr}");
+
+        tokio::spawn(async move {
+            if let Err(e) = Server::new(config, stream).handle_conn().await {
+                eprintln!("Error handling connection: {:?}", e);
+            }
+        });
+    }
 }
 
 async fn setup_config() -> Result<Config> {
@@ -58,6 +74,19 @@ async fn setup_replication(args: &Args, store: Arc<Store>) -> Result<ReplicaType
     }
 }
 
+fn parse_replica(args: &Args) -> Option<(String, u16)> {
+    args.replicaof.as_ref().and_then(|replicaof| {
+        let mut parts = replicaof.split_whitespace();
+        match (parts.next(), parts.next()) {
+            (Some(host), Some(port_str)) => port_str
+                .parse::<u16>()
+                .ok()
+                .map(|port| (host.to_string(), port)),
+            _ => None,
+        }
+    })
+}
+
 async fn spawn_follower(
     host: &str,
     leader_port: u16,
@@ -74,36 +103,4 @@ async fn spawn_follower(
     });
 
     Ok(())
-}
-
-async fn start_server(config: Config) -> Result<()> {
-    let addr = SocketAddrV4::new(LOCALHOST, config.port);
-    let listener = TcpListener::bind(addr).await?;
-
-    println!("Server listening on {addr}");
-
-    loop {
-        let (stream, addr) = listener.accept().await?;
-        let config = config.clone();
-        println!("Accepted new connection from {addr}");
-
-        tokio::spawn(async move {
-            if let Err(e) = Server::new(config, stream).handle_conn().await {
-                eprintln!("Error handling connection: {:?}", e);
-            }
-        });
-    }
-}
-
-fn parse_replica(args: &Args) -> Option<(String, u16)> {
-    args.replicaof.as_ref().and_then(|replicaof| {
-        let mut parts = replicaof.split_whitespace();
-        match (parts.next(), parts.next()) {
-            (Some(host), Some(port_str)) => port_str
-                .parse::<u16>()
-                .ok()
-                .map(|port| (host.to_string(), port)),
-            _ => None,
-        }
-    })
 }

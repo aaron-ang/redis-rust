@@ -1,12 +1,14 @@
 use anyhow::Result;
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::{
     collections::HashMap,
+    io::Read,
     time::{Duration, UNIX_EPOCH},
 };
 use strum::{Display, EnumString};
-use tokio::{io::AsyncReadExt, sync::RwLock};
+use tokio::sync::RwLock;
 
-use crate::{db::RedisData, Store};
+use crate::db::{RecordType, RedisData, Store};
 
 #[derive(Clone, Copy, PartialEq, Display, EnumString)]
 pub enum Command {
@@ -21,6 +23,7 @@ pub enum Command {
     CONFIG,
     KEYS,
     TYPE,
+    XADD,
 }
 
 #[derive(Clone, Copy, PartialEq, Display)]
@@ -68,7 +71,7 @@ impl ReplicationState {
 
 pub struct Instance {
     _version: [u8; 4],
-    _metadata: HashMap<StringValue, StringValue>,
+    _metadata: HashMap<StringRecord, StringRecord>,
     databases: HashMap<usize, Store>,
     _checksum: [u8; 8],
 }
@@ -76,10 +79,10 @@ pub struct Instance {
 const MAGIC: &str = "REDIS";
 
 impl Instance {
-    pub async fn new<T: AsyncReadExt + Unpin>(mut buf: T) -> Result<Self> {
-        Self::validate_magic(&mut buf).await?;
-        let version = Self::read_version(&mut buf).await?;
-        let (metadata, databases, checksum) = Self::read_sections(&mut buf).await?;
+    pub fn new<T: Read>(mut buf: T) -> Result<Self> {
+        Self::validate_magic(&mut buf)?;
+        let version = Self::read_version(&mut buf)?;
+        let (metadata, databases, checksum) = Self::read_sections(&mut buf)?;
 
         Ok(Instance {
             _version: version,
@@ -89,9 +92,9 @@ impl Instance {
         })
     }
 
-    async fn validate_magic<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<()> {
+    fn validate_magic<T: Read>(buf: &mut T) -> Result<()> {
         let mut magic = [0u8; MAGIC.len()];
-        buf.read_exact(&mut magic).await?;
+        buf.read_exact(&mut magic)?;
         anyhow::ensure!(
             magic == MAGIC.as_bytes(),
             "Invalid magic string: {}",
@@ -100,16 +103,16 @@ impl Instance {
         Ok(())
     }
 
-    async fn read_version<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<[u8; 4]> {
+    fn read_version<T: Read>(buf: &mut T) -> Result<[u8; 4]> {
         let mut version = [0u8; 4];
-        buf.read_exact(&mut version).await?;
+        buf.read_exact(&mut version)?;
         Ok(version)
     }
 
-    async fn read_sections<T: AsyncReadExt + Unpin>(
+    fn read_sections<T: Read>(
         buf: &mut T,
     ) -> Result<(
-        HashMap<StringValue, StringValue>,
+        HashMap<StringRecord, StringRecord>,
         HashMap<usize, Store>,
         [u8; 8],
     )> {
@@ -117,59 +120,59 @@ impl Instance {
         let mut databases = HashMap::new();
 
         loop {
-            match buf.read_u8().await?.into() {
+            match buf.read_u8()?.into() {
                 SectionId::Metadata => {
-                    let name = read_string(buf).await?;
-                    let value = read_string(buf).await?;
+                    let name = read_string(buf)?;
+                    let value = read_string(buf)?;
                     metadata.insert(name, value);
                 }
                 SectionId::Database => {
-                    let (index, store) = Self::read_database(buf).await?;
+                    let (index, store) = Self::read_database(buf)?;
                     databases.insert(index, store);
                 }
                 SectionId::EndOfFile => {
                     let mut checksum = [0u8; 8];
-                    buf.read_exact(&mut checksum).await?;
+                    buf.read_exact(&mut checksum)?;
                     return Ok((metadata, databases, checksum));
                 }
             }
         }
     }
 
-    async fn read_database<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<(usize, Store)> {
-        let index = read_numeric_length(buf).await?;
+    fn read_database<T: Read>(buf: &mut T) -> Result<(usize, Store)> {
+        let index = read_numeric_length(buf)?;
         anyhow::ensure!(
-            buf.read_u8().await? == 0xFBu8,
+            buf.read_u8()? == 0xFBu8,
             "Expected hash table size information (0xFB)"
         );
 
-        let num_entries = read_numeric_length(buf).await?;
-        let _num_entries_with_expire = read_numeric_length(buf).await?;
+        let num_entries = read_numeric_length(buf)?;
+        let _num_entries_with_expire = read_numeric_length(buf)?;
 
         let mut entries = HashMap::with_capacity(num_entries);
         for _ in 0..num_entries {
-            let (key, value) = Self::read_entry(buf).await?;
+            let (key, value) = Self::read_entry(buf)?;
             entries.insert(key, value);
         }
 
         Ok((index, Store::new_with_entries(entries)))
     }
 
-    async fn read_entry<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<(String, RedisData)> {
-        let expires_on = match buf.read_u8().await? {
+    fn read_entry<T: Read>(buf: &mut T) -> Result<(String, RedisData)> {
+        let expires_on = match buf.read_u8()? {
             0 => None,
-            0xFC => Some(UNIX_EPOCH + Duration::from_millis(buf.read_u64_le().await?)),
-            0xFD => Some(UNIX_EPOCH + Duration::from_secs(buf.read_u32_le().await? as u64)),
+            0xFC => Some(UNIX_EPOCH + Duration::from_millis(buf.read_u64::<LittleEndian>()?)),
+            0xFD => Some(UNIX_EPOCH + Duration::from_secs(buf.read_u32::<LittleEndian>()? as u64)),
             flag => anyhow::bail!("Invalid value flag: {}", flag),
         };
 
         if expires_on.is_some() {
-            let _value_type = buf.read_u8().await?;
+            let _value_type = buf.read_u8()?;
         }
 
-        let key = read_string(buf).await?.to_string();
-        let value = read_string(buf).await?.to_string();
-        Ok((key, RedisData::new(value, expires_on)))
+        let key = read_string(buf)?.to_string();
+        let value = read_string(buf)?;
+        Ok((key, RedisData::new(RecordType::String(value), expires_on)))
     }
 
     pub fn get_db(&self, index: usize) -> Result<&Store> {
@@ -204,55 +207,65 @@ enum LengthValue {
     CompressedString,
 }
 
-#[derive(Hash, PartialEq, Eq)]
-enum StringValue {
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum StringRecord {
     String(String),
     Integer(u32),
 }
 
-impl ToString for StringValue {
+impl ToString for StringRecord {
     fn to_string(&self) -> String {
         match self {
-            StringValue::String(s) => s.clone(),
-            StringValue::Integer(i) => i.to_string(),
+            StringRecord::String(s) => s.clone(),
+            StringRecord::Integer(i) => i.to_string(),
         }
     }
 }
 
-async fn read_string<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<StringValue> {
-    match read_length(buf).await? {
+impl<T: AsRef<str>> From<T> for StringRecord {
+    fn from(value: T) -> Self {
+        StringRecord::String(value.as_ref().to_string())
+    }
+}
+
+fn read_string<T: Read>(buf: &mut T) -> Result<StringRecord> {
+    match read_length(buf)? {
         LengthValue::Length(length) => {
             let mut bytes = vec![0u8; length];
-            buf.read_exact(&mut bytes).await?;
-            Ok(StringValue::String(String::from_utf8(bytes)?))
+            buf.read_exact(&mut bytes)?;
+            Ok(StringRecord::String(String::from_utf8(bytes)?))
         }
-        LengthValue::IntegerAsString8 => Ok(StringValue::Integer(buf.read_u8().await? as u32)),
-        LengthValue::IntegerAsString16 => Ok(StringValue::Integer(buf.read_u16_le().await? as u32)),
-        LengthValue::IntegerAsString32 => Ok(StringValue::Integer(buf.read_u32_le().await?)),
+        LengthValue::IntegerAsString8 => Ok(StringRecord::Integer(buf.read_u8()? as u32)),
+        LengthValue::IntegerAsString16 => {
+            Ok(StringRecord::Integer(buf.read_u16::<LittleEndian>()? as u32))
+        }
+        LengthValue::IntegerAsString32 => {
+            Ok(StringRecord::Integer(buf.read_u32::<LittleEndian>()?))
+        }
         LengthValue::CompressedString => {
-            let clen = read_numeric_length(buf).await?;
-            let _ulen = read_numeric_length(buf).await?;
+            let clen = read_numeric_length(buf)?;
+            let _ulen = read_numeric_length(buf)?;
             let mut bytes = vec![0u8; clen];
-            buf.read_exact(&mut bytes).await?;
-            Ok(StringValue::String(String::from_utf8(bytes)?))
+            buf.read_exact(&mut bytes)?;
+            Ok(StringRecord::String(String::from_utf8(bytes)?))
         }
     }
 }
 
-async fn read_length<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<LengthValue> {
-    let first_byte = buf.read_u8().await?;
+fn read_length<T: Read>(buf: &mut T) -> Result<LengthValue> {
+    let first_byte = buf.read_u8()?;
     let first_two_bits = first_byte >> 6;
-    let remaining_six_bits = first_byte & 0b111111;
+    let remaining_six_bits = first_byte & 0b0011_1111;
 
     match first_two_bits {
-        0b00 => Ok(LengthValue::Length(remaining_six_bits.into())),
+        0b00 => Ok(LengthValue::Length(remaining_six_bits as usize)),
         0b01 => {
-            let second_byte = buf.read_u8().await?;
+            let second_byte = buf.read_u8()?;
             Ok(LengthValue::Length(
-                (remaining_six_bits << 8 | second_byte).into(),
+                ((remaining_six_bits as usize) << 8) | second_byte as usize,
             ))
         }
-        0b10 => Ok(LengthValue::Length(buf.read_u32().await? as usize)),
+        0b10 => Ok(LengthValue::Length(buf.read_u32::<BigEndian>()? as usize)),
         0b11 => match remaining_six_bits {
             0 => Ok(LengthValue::IntegerAsString8),
             1 => Ok(LengthValue::IntegerAsString16),
@@ -264,8 +277,8 @@ async fn read_length<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<LengthValue
     }
 }
 
-async fn read_numeric_length<T: AsyncReadExt + Unpin>(buf: &mut T) -> Result<usize> {
-    match read_length(buf).await? {
+fn read_numeric_length<T: Read>(buf: &mut T) -> Result<usize> {
+    match read_length(buf)? {
         LengthValue::Length(length) => Ok(length),
         _ => anyhow::bail!("Expected a numeric length, received special length"),
     }

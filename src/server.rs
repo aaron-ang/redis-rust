@@ -1,11 +1,11 @@
 use crate::config::Config;
-use crate::db::Store;
+use crate::db::{RecordType, Store};
 use crate::util::{Command, ReplicaType};
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
-use std::{io::BufReader, str::FromStr, time::SystemTime};
+use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -84,14 +84,14 @@ impl Server {
             Command::PING => Some(Value::String("PONG".into())),
             Command::ECHO => args.first().cloned(),
             Command::SET => {
-                let resp = handle_set(args, &self.config.store)?;
+                let resp = handle_set(args, &self.config.store).await?;
                 if self.config.role == ReplicaType::Leader {
                     let _ = self.config.tx.send(cmd_line.clone());
                 }
                 Some(resp)
             }
-            Command::GET => handle_get(args, &self.config.store)?,
-            Command::INFO => handle_info(&self.config.role),
+            Command::GET => handle_get(args, &self.config.store).await?,
+            Command::INFO => Some(self.handle_info()),
             Command::REPLCONF => Some(Value::String("OK".into())),
             Command::PSYNC => {
                 self.handle_psync().await?;
@@ -99,8 +99,9 @@ impl Server {
             }
             Command::WAIT => self.handle_wait(args).await?,
             Command::CONFIG => self.handle_config(args)?,
-            Command::KEYS => self.handle_keys(args)?,
-            Command::TYPE => self.handle_type(args)?,
+            Command::KEYS => Some(self.handle_keys(args).await?),
+            Command::TYPE => Some(self.handle_type(args).await?),
+            Command::XADD => Some(self.handle_xadd(args).await?),
         };
 
         self.config
@@ -109,6 +110,14 @@ impl Server {
             .await;
 
         Ok(response)
+    }
+
+    fn handle_info(&self) -> Value {
+        let value = format!(
+            "role:{}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}",
+            self.config.role
+        );
+        Value::Bulk(value)
     }
 
     async fn handle_psync(&mut self) -> Result<()> {
@@ -192,29 +201,60 @@ impl Server {
         Ok(res)
     }
 
-    fn handle_keys(&self, args: &[Value]) -> Result<Option<Value>> {
+    async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
             bail!("Wrong number of arguments for KEYS command");
         }
 
         let pattern = unpack_bulk_string(&args[0])?;
-        let keys = self.config.store.keys(pattern)?;
-        let res = Some(Value::Array(keys.into_iter().map(Value::Bulk).collect()));
-        Ok(res)
+        let keys = self.config.store.keys(pattern).await?;
+        Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
     }
 
-    fn handle_type(&self, args: &[Value]) -> Result<Option<Value>> {
+    async fn handle_type(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
             bail!("Wrong number of arguments for TYPE command");
         }
 
         let key = unpack_bulk_string(&args[0])?;
-        let value = self.config.store.get(key);
+        let value = self.config.store.get(key).await;
         let res = match value {
-            Some(_) => Some(Value::Bulk("string".into())),
-            None => Some(Value::Bulk("none".into())),
+            Some(RecordType::String(_)) => Value::Bulk("string".into()),
+            Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
+            None => Value::Bulk("none".into()),
         };
         Ok(res)
+    }
+
+    async fn handle_xadd(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 3 {
+            bail!("XADD command requires at least 2 arguments");
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let entry_id = unpack_bulk_string(&args[1])?;
+
+        let values = args[2..]
+            .chunks(2)
+            .map(|pair| {
+                if let [field, value] = pair {
+                    Ok((
+                        unpack_bulk_string(field)?.to_string(),
+                        unpack_bulk_string(value)?.to_string(),
+                    ))
+                } else {
+                    bail!("Incorrect key-value pairs format.")
+                }
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        let stream_entry_id = self
+            .config
+            .store
+            .add_stream_entry(key, entry_id, values)
+            .await?;
+
+        Ok(Value::Bulk(stream_entry_id.to_string()))
     }
 
     fn num_followers(&self) -> usize {
@@ -241,7 +281,7 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
     }
 }
 
-pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
+pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
         bail!("SET command requires at least 2 arguments");
     }
@@ -263,20 +303,19 @@ pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
         }
     }
 
-    store.set(key.to_string(), value.to_string(), expiry);
+    store.set(key.to_string(), value.into(), expiry).await;
     Ok(Value::String("OK".into()))
 }
 
-pub fn handle_get(args: &[Value], store: &Store) -> Result<Option<Value>> {
+pub async fn handle_get(args: &[Value], store: &Store) -> Result<Option<Value>> {
     if args.is_empty() {
         bail!("GET command requires at least 1 argument");
     }
-    let key = unpack_bulk_string(&args[0])?;
-    Ok(store.get(key).map(Value::Bulk).or(Some(Value::Null)))
-}
 
-fn handle_info(role: &ReplicaType) -> Option<Value> {
-    let value =
-        format!("role:{role}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}");
-    Some(Value::Bulk(value))
+    let key = unpack_bulk_string(&args[0])?;
+    match store.get(key).await {
+        Some(RecordType::String(s)) => Ok(Some(Value::Bulk(s.to_string()))),
+        Some(RecordType::Stream(_)) => todo!(),
+        None => Ok(Some(Value::Null)),
+    }
 }

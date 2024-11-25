@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
 
 async fn setup_config() -> Result<Config> {
     let args = Args::parse();
-    let store = Arc::new(Store::from_path(&args.dir, &args.dbfilename).await?);
+    let store = Arc::new(Store::from_path(&args.dir, &args.dbfilename)?);
     let role = setup_replication(&args, store.clone()).await?;
 
     Ok(Config::new(

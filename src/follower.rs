@@ -72,10 +72,10 @@ impl Follower {
         match command {
             Command::PING => {}
             Command::SET => {
-                server::handle_set(args, &self.store)?;
+                server::handle_set(args, &self.store).await?;
             }
             Command::GET => {
-                server::handle_get(args, &self.store)?;
+                server::handle_get(args, &self.store).await?;
             }
             Command::REPLCONF => self.handle_replconf().await?,
             _ => eprintln!("Unknown command: {}", command),

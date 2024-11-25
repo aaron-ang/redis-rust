@@ -1,19 +1,33 @@
 use anyhow::Result;
 use glob::Pattern;
-use std::{collections::HashMap, path::PathBuf, sync::RwLock, time::SystemTime};
-use tokio::fs;
+use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::SystemTime};
+use tokio::sync::RwLock;
 
-use crate::util::Instance;
+use crate::stream::{StreamEntryId, StreamRecord};
+use crate::util::{Instance, StringRecord};
+
+#[derive(Clone)]
+pub enum RecordType {
+    String(StringRecord),
+    Stream(StreamRecord),
+}
 
 #[derive(Clone)]
 pub struct RedisData {
-    value: String,
+    record: RecordType,
     expiry: Option<SystemTime>,
 }
 
 impl RedisData {
-    pub fn new(value: String, expiry: Option<SystemTime>) -> Self {
-        RedisData { value, expiry }
+    pub fn new(record: RecordType, expiry: Option<SystemTime>) -> Self {
+        RedisData { record, expiry }
+    }
+
+    fn new_stream(key: String) -> Self {
+        RedisData {
+            record: RecordType::Stream(StreamRecord::new(key)),
+            expiry: None,
+        }
     }
 
     fn is_expired(&self) -> bool {
@@ -25,26 +39,18 @@ impl RedisData {
     }
 }
 
+#[derive(Clone)]
 pub struct Store {
-    entries: RwLock<HashMap<String, RedisData>>,
-}
-
-impl Clone for Store {
-    fn clone(&self) -> Self {
-        let storage = self.entries.read().unwrap();
-        Store {
-            entries: RwLock::new(storage.clone()),
-        }
-    }
+    entries: Arc<RwLock<HashMap<String, RedisData>>>,
 }
 
 impl Store {
-    pub async fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Self> {
+    pub fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Self> {
         if let (Some(dir), Some(filename)) = (dir, dbfilename) {
             let path = dir.join(filename);
             if path.exists() {
-                let file = fs::File::open(&path).await?;
-                let instance = Instance::new(file).await?;
+                let file = fs::File::open(&path)?;
+                let instance = Instance::new(file)?;
                 return instance.get_db(0).map(|db| db.clone());
             }
         }
@@ -57,36 +63,36 @@ impl Store {
 
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
-            entries: RwLock::new(entries),
+            entries: Arc::new(RwLock::new(entries)),
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<String> {
-        let storage = self.entries.read().unwrap();
+    pub async fn get(&self, key: &str) -> Option<RecordType> {
+        let storage = self.entries.read().await;
         let data = storage.get(key)?;
         if data.is_expired() {
             drop(storage);
-            self.entries.write().unwrap().remove(key);
+            self.entries.write().await.remove(key);
             None
         } else {
-            Some(data.value.clone())
+            Some(data.record.clone())
         }
     }
 
-    pub fn set(&self, key: String, value: String, expiry: Option<SystemTime>) {
+    pub async fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
         self.entries
             .write()
-            .unwrap()
-            .insert(key, RedisData::new(value, expiry));
+            .await
+            .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
 
-    pub fn keys(&self, pattern: &str) -> Result<Vec<String>> {
+    pub async fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();
         let mut matched = Vec::new();
 
         {
-            let storage = self.entries.read().unwrap();
+            let storage = self.entries.read().await;
             for (key, data) in storage.iter() {
                 if data.is_expired() {
                     expired.push(key.clone());
@@ -96,11 +102,33 @@ impl Store {
             }
         }
 
-        let mut storage = self.entries.write().unwrap();
+        let mut storage = self.entries.write().await;
         for key in expired {
             storage.remove(&key);
         }
 
         Ok(matched)
+    }
+
+    pub async fn add_stream_entry(
+        &self,
+        key: &str,
+        entry_id: &str,
+        values: HashMap<String, String>,
+    ) -> Result<StreamEntryId> {
+        let mut storage = self.entries.write().await;
+        let stream_data = storage
+            .entry(key.to_string())
+            .or_insert_with(|| RedisData::new_stream(key.to_string()));
+
+        if stream_data.is_expired() || !matches!(stream_data.record, RecordType::String(_)) {
+            *stream_data = RedisData::new_stream(key.to_string());
+        }
+
+        if let RecordType::Stream(stream) = &mut stream_data.record {
+            stream.xadd(entry_id, values).await
+        } else {
+            unreachable!("Stream data is not a Stream record");
+        }
     }
 }

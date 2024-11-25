@@ -2,7 +2,7 @@ use crate::config::Config;
 use crate::db::Store;
 use crate::util::{Command, ReplicaType};
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
 use std::{io::BufReader, str::FromStr, time::SystemTime};
@@ -55,22 +55,20 @@ impl Server {
                         Ok(v) => {
                             self.stream.write_all(&v.encode()).await?;
                         }
-                        Err(e) => match e {
-                            RecvError::Closed => {
-                                eprintln!("Channel closed");
-                                break;
-                            }
-                            RecvError::Lagged(n) => {
-                                eprintln!("Lagged by {n} messages");
-                            }
-                        },
+                        Err(RecvError::Closed) => {
+                            eprintln!("Channel closed");
+                            break;
+                        }
+                        Err(RecvError::Lagged(n)) => {
+                            eprintln!("Lagged by {n} messages");
+                        }
                     }
-                    let mut buf = vec![0; 1024];
+
                     if let Ok(bytes_read) =
                         timeout(Duration::from_millis(100), self.stream.read(&mut buf)).await
                     {
                         let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
-                        while let Some(_) = decoder.decode().ok() {
+                        while decoder.decode().ok().is_some() {
                             self.config.rep_state.incr_num_ack().await;
                         }
                     }
@@ -81,16 +79,10 @@ impl Server {
     }
 
     pub async fn execute(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
-        let (command, args) = extract_command(&cmd_line)?;
+        let (command, args) = extract_command(cmd_line)?;
         let response = match command {
             Command::PING => Some(Value::String("PONG".into())),
-            Command::ECHO => {
-                if args.is_empty() {
-                    None
-                } else {
-                    Some(args[0].clone())
-                }
-            }
+            Command::ECHO => args.first().cloned(),
             Command::SET => {
                 let resp = handle_set(args, &self.config.store)?;
                 if self.config.role == ReplicaType::Leader {
@@ -105,7 +97,7 @@ impl Server {
                 self.handle_psync().await?;
                 None
             }
-            Command::WAIT => self.handle_wait(&args).await?,
+            Command::WAIT => self.handle_wait(args).await?,
             Command::CONFIG => self.handle_config(args)?,
             Command::KEYS => self.handle_keys(args)?,
             Command::TYPE => self.handle_type(args)?,
@@ -125,7 +117,7 @@ impl Server {
 
         let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
         self.stream
-            .write(format!("${}\r\n", rdb.len()).as_bytes())
+            .write_all(format!("${}\r\n", rdb.len()).as_bytes())
             .await?;
         self.stream.write_all(&rdb).await?;
         self.stream.flush().await?;
@@ -133,23 +125,21 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_wait(&mut self, args: &Vec<Value>) -> Result<Option<Value>> {
+    async fn handle_wait(&mut self, args: &[Value]) -> Result<Option<Value>> {
         if args.len() < 2 {
             return Ok(None);
         }
         let limit = unpack_bulk_string(&args[0])?.parse::<usize>()?;
-        let timeout = unpack_bulk_string(&args[1])?.parse::<u64>()?;
+        let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
-        if limit <= 0 {
+        if limit == 0 {
             return Ok(Some(Value::Integer(self.num_followers() as i64)));
         }
 
         let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::SET) {
-            // If last command wasn't SET, just sleep for timeout duration
-            sleep(Duration::from_millis(timeout)).await;
+            sleep(Duration::from_millis(timeout_ms)).await;
             self.num_followers()
         } else {
-            // Get acknowledgements from followers
             let repl_getack = Value::Array(vec![
                 Value::Bulk("REPLCONF".into()),
                 Value::Bulk("GETACK".into()),
@@ -157,17 +147,15 @@ impl Server {
             ]);
             self.config.tx.send(repl_getack)?;
 
-            // Wait until either timeout or we get enough acknowledgements
-            let end = Instant::now() + Duration::from_millis(timeout);
+            let end_time = Instant::now() + Duration::from_millis(timeout_ms);
             let num_ack = loop {
                 let curr_acks = self.config.rep_state.get_num_ack().await;
-                if Instant::now() >= end || curr_acks >= limit {
+                if Instant::now() >= end_time || curr_acks >= limit {
                     break curr_acks;
                 }
                 sleep(Duration::from_millis(100)).await;
             };
 
-            // Reset state
             self.config.rep_state.reset().await;
             num_ack
         };
@@ -175,13 +163,13 @@ impl Server {
         Ok(Some(Value::Integer(responded as i64)))
     }
 
-    fn handle_config(&self, args: Vec<Value>) -> Result<Option<Value>> {
+    fn handle_config(&self, args: &[Value]) -> Result<Option<Value>> {
         if args.len() < 2 {
             return Ok(None);
         }
 
         let cmd = unpack_bulk_string(&args[0])?;
-        let cmd = Command::from_str(&cmd)?;
+        let cmd = Command::from_str(cmd)?;
         let res = match cmd {
             Command::GET => {
                 let name = unpack_bulk_string(&args[1])?;
@@ -195,33 +183,33 @@ impl Server {
                             .unwrap_or_default(),
                     ),
                     "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
-                    _ => anyhow::bail!("Invalid CONFIG option"),
+                    _ => bail!("Invalid CONFIG option"),
                 };
-                Some(Value::Array(vec![Value::Bulk(name), value]))
+                Some(Value::Array(vec![Value::Bulk(name.to_string()), value]))
             }
             _ => None,
         };
         Ok(res)
     }
 
-    fn handle_keys(&self, args: Vec<Value>) -> Result<Option<Value>> {
+    fn handle_keys(&self, args: &[Value]) -> Result<Option<Value>> {
         if args.len() != 1 {
-            anyhow::bail!("Wrong number of arguments for KEYS command");
+            bail!("Wrong number of arguments for KEYS command");
         }
 
         let pattern = unpack_bulk_string(&args[0])?;
-        let keys = self.config.store.keys(&pattern)?;
+        let keys = self.config.store.keys(pattern)?;
         let res = Some(Value::Array(keys.into_iter().map(Value::Bulk).collect()));
         Ok(res)
     }
 
-    fn handle_type(&self, args: Vec<Value>) -> Result<Option<Value>> {
+    fn handle_type(&self, args: &[Value]) -> Result<Option<Value>> {
         if args.len() != 1 {
-            anyhow::bail!("Wrong number of arguments for TYPE command");
+            bail!("Wrong number of arguments for TYPE command");
         }
 
         let key = unpack_bulk_string(&args[0])?;
-        let value = self.config.store.get(&key);
+        let value = self.config.store.get(key);
         let res = match value {
             Some(_) => Some(Value::Bulk("string".into())),
             None => Some(Value::Bulk("none".into())),
@@ -234,28 +222,28 @@ impl Server {
     }
 }
 
-pub fn extract_command(value: &Value) -> Result<(Command, Vec<Value>)> {
+pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
     if let Value::Array(a) = value {
         let command_str = unpack_bulk_string(&a[0])?;
-        let command = Command::from_str(&command_str)?;
-        let args = a[1..].to_vec();
+        let command = Command::from_str(command_str)?;
+        let args = &a[1..];
         Ok((command, args))
     } else {
-        anyhow::bail!("Expected array value")
+        bail!("Expected array value")
     }
 }
 
-fn unpack_bulk_string(value: &Value) -> Result<String> {
-    if let Value::Bulk(s) = value {
-        Ok(s.clone())
+fn unpack_bulk_string(value: &Value) -> Result<&str> {
+    if let Value::Bulk(ref s) = value {
+        Ok(s)
     } else {
-        anyhow::bail!("Expected bulk string")
+        bail!("Expected bulk string")
     }
 }
 
-pub fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
+pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        anyhow::bail!("SET command requires at least 2 arguments");
+        bail!("SET command requires at least 2 arguments");
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -267,27 +255,24 @@ pub fn handle_set(args: Vec<Value>, store: &Store) -> Result<Value> {
             "px" => {
                 let ms = match args.get(3) {
                     Some(Value::Bulk(arg)) => arg.parse::<u64>().unwrap_or(0),
-                    _ => anyhow::bail!("Invalid PX option"),
+                    _ => bail!("Invalid PX option"),
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
-            _ => anyhow::bail!("Invalid SET option"),
+            _ => bail!("Invalid SET option"),
         }
     }
 
-    store.set(key, value, expiry);
+    store.set(key.to_string(), value.to_string(), expiry);
     Ok(Value::String("OK".into()))
 }
 
-pub fn handle_get(args: Vec<Value>, store: &Store) -> Result<Option<Value>> {
+pub fn handle_get(args: &[Value], store: &Store) -> Result<Option<Value>> {
     if args.is_empty() {
-        anyhow::bail!("GET command requires at least 1 argument");
+        bail!("GET command requires at least 1 argument");
     }
     let key = unpack_bulk_string(&args[0])?;
-    Ok(store
-        .get(&key)
-        .map(|v| Value::Bulk(v))
-        .or(Some(Value::Null)))
+    Ok(store.get(key).map(Value::Bulk).or(Some(Value::Null)))
 }
 
 fn handle_info(role: &ReplicaType) -> Option<Value> {

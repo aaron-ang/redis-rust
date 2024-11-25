@@ -32,44 +32,37 @@ pub enum ReplicaType {
 }
 
 pub struct ReplicationState {
-    inner: RwLock<InnerReplicationState>,
-}
-
-struct InnerReplicationState {
-    num_ack: usize,
-    prev_client_cmd: Option<Command>,
+    num_ack: RwLock<usize>,
+    prev_client_cmd: RwLock<Option<Command>>,
 }
 
 impl ReplicationState {
     pub fn new() -> Self {
         Self {
-            inner: RwLock::new(InnerReplicationState {
-                num_ack: 0,
-                prev_client_cmd: None,
-            }),
+            num_ack: RwLock::new(0),
+            prev_client_cmd: RwLock::new(None),
         }
     }
 
     pub async fn get_num_ack(&self) -> usize {
-        self.inner.read().await.num_ack
+        *self.num_ack.read().await
     }
 
     pub async fn incr_num_ack(&self) {
-        self.inner.write().await.num_ack += 1;
+        *self.num_ack.write().await += 1;
     }
 
     pub async fn reset(&self) {
-        let mut state = self.inner.write().await;
-        state.num_ack = 0;
-        state.prev_client_cmd = None;
+        *self.num_ack.write().await = 0;
+        *self.prev_client_cmd.write().await = None;
     }
 
     pub async fn get_prev_client_cmd(&self) -> Option<Command> {
-        self.inner.read().await.prev_client_cmd
+        *self.prev_client_cmd.read().await
     }
 
     pub async fn set_prev_client_cmd(&self, cmd: Option<Command>) {
-        self.inner.write().await.prev_client_cmd = cmd;
+        *self.prev_client_cmd.write().await = cmd;
     }
 }
 

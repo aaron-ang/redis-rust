@@ -40,21 +40,19 @@ impl Clone for Store {
 
 impl Store {
     pub async fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Self> {
-        match (dir, dbfilename) {
-            (Some(dir), Some(filename)) => {
-                let path = dir.join(filename);
-                if !path.exists() {
-                    return Ok(Self::new_with_entries(HashMap::new()));
-                }
-
+        if let (Some(dir), Some(filename)) = (dir, dbfilename) {
+            let path = dir.join(filename);
+            if path.exists() {
                 let file = fs::File::open(&path).await?;
                 let instance = Instance::new(file).await?;
-                // get first database
-                let db = instance.get_db(0)?;
-                Ok(db.clone())
+                return instance.get_db(0).map(|db| db.clone());
             }
-            _ => Ok(Self::new_with_entries(HashMap::new())),
         }
+        Self::empty()
+    }
+
+    fn empty() -> Result<Self> {
+        Ok(Store::new_with_entries(HashMap::new()))
     }
 
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
@@ -65,26 +63,27 @@ impl Store {
 
     pub fn get(&self, key: &str) -> Option<String> {
         let storage = self.entries.read().unwrap();
-        if let Some(data) = storage.get(key) {
-            if data.is_expired() {
-                drop(storage); // release read lock before acquiring write lock
-                self.entries.write().unwrap().remove(key);
-                return None;
-            }
-            return Some(data.value.clone());
+        let data = storage.get(key)?;
+        if data.is_expired() {
+            drop(storage);
+            self.entries.write().unwrap().remove(key);
+            None
+        } else {
+            Some(data.value.clone())
         }
-        None
     }
 
     pub fn set(&self, key: String, value: String, expiry: Option<SystemTime>) {
-        let mut storage = self.entries.write().unwrap();
-        storage.insert(key, RedisData { value, expiry });
+        self.entries
+            .write()
+            .unwrap()
+            .insert(key, RedisData::new(value, expiry));
     }
 
     pub fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();
-        let mut keys = Vec::new();
+        let mut matched = Vec::new();
 
         {
             let storage = self.entries.read().unwrap();
@@ -92,7 +91,7 @@ impl Store {
                 if data.is_expired() {
                     expired.push(key.clone());
                 } else if pattern.matches(key) {
-                    keys.push(key.clone());
+                    matched.push(key.clone());
                 }
             }
         }
@@ -102,6 +101,6 @@ impl Store {
             storage.remove(&key);
         }
 
-        Ok(keys)
+        Ok(matched)
     }
 }

@@ -22,10 +22,30 @@ impl StreamRecord {
         entry_id: &str,
         values: HashMap<String, String>,
     ) -> Result<StreamEntryId> {
-        let entry_id = entry_id.parse::<StreamEntryId>()?;
+        let entry_id = self.generate_entry_id(entry_id)?;
         self.validate_entry_id(&entry_id)?;
         self.value.insert(entry_id.clone(), values);
         Ok(entry_id)
+    }
+
+    fn generate_entry_id(&self, entry_id: &str) -> Result<StreamEntryId> {
+        let (ts_str, seq_no_str) = entry_id
+            .split_once('-')
+            .ok_or_else(|| anyhow::anyhow!("Invalid entry ID format"))?;
+
+        let ts_ms = ts_str.parse::<u64>()?;
+        match seq_no_str {
+            "*" => {
+                if ts_ms < self.top_entry_id.ts_ms {
+                    anyhow::bail!("ERR The ID specified in XADD must be greater than the last one");
+                } else if ts_ms == self.top_entry_id.ts_ms {
+                    Ok(StreamEntryId::new(ts_ms, self.top_entry_id.seq_no + 1))
+                } else {
+                    Ok(StreamEntryId::new(ts_ms, 0))
+                }
+            }
+            _ => entry_id.parse().map_err(anyhow::Error::from),
+        }
     }
 
     fn validate_entry_id(&mut self, entry_id: &StreamEntryId) -> Result<()> {

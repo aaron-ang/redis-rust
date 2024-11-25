@@ -78,6 +78,9 @@ impl Follower {
                 server::handle_get(args, &self.store).await?;
             }
             Command::REPLCONF => self.handle_replconf().await?,
+            Command::XADD => {
+                server::handle_xadd(args, &self.store).await?;
+            }
             _ => eprintln!("Unknown command: {}", command),
         }
         Ok(())

@@ -6,6 +6,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 use strum::{Display, EnumString};
+use thiserror::Error;
 use tokio::sync::RwLock;
 
 use crate::db::{RecordType, RedisData, Store};
@@ -26,6 +27,21 @@ pub enum Command {
     TYPE,
     XADD,
     XRANGE,
+    XREAD,
+}
+
+impl Command {
+    pub fn is_write(&self) -> bool {
+        matches!(self, Command::SET | Command::XADD)
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum InputError {
+    #[error("ERR wrong number of arguments for command")]
+    InvalidArgument,
+    #[error("value is not an integer or out of range")]
+    InvalidInteger,
 }
 
 #[derive(Clone, Copy, PartialEq, Display)]

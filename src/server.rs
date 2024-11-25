@@ -1,6 +1,6 @@
 use crate::config::Config;
 use crate::db::{RecordType, Store};
-use crate::util::{Command, ReplicaType};
+use crate::util::{Command, InputError, ReplicaType};
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
@@ -41,37 +41,46 @@ impl Server {
                 eprintln!("Client disconnected");
                 break;
             }
+
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Some(cmd_line) = decoder.decode().ok() {
-                if let Some(response) = self.execute(&cmd_line).await? {
+                if let Some(response) = self
+                    .execute(&cmd_line)
+                    .await
+                    .unwrap_or_else(|e| Some(Value::Error(e.to_string())))
+                {
                     self.stream.write_all(&response.encode()).await?;
                 }
             }
 
             if self.replication {
-                let mut rx = self.config.tx.subscribe();
-                loop {
-                    match rx.recv().await {
-                        Ok(v) => {
-                            self.stream.write_all(&v.encode()).await?;
-                        }
-                        Err(RecvError::Closed) => {
-                            eprintln!("Channel closed");
-                            break;
-                        }
-                        Err(RecvError::Lagged(n)) => {
-                            eprintln!("Lagged by {n} messages");
-                        }
-                    }
+                self.handle_replication(&mut buf).await?;
+            }
+        }
+        Ok(())
+    }
 
-                    if let Ok(bytes_read) =
-                        timeout(Duration::from_millis(100), self.stream.read(&mut buf)).await
-                    {
-                        let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
-                        while decoder.decode().ok().is_some() {
-                            self.config.rep_state.incr_num_ack().await;
-                        }
-                    }
+    async fn handle_replication(&mut self, buf: &mut [u8]) -> Result<()> {
+        let mut rx = self.config.tx.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(v) => self.stream.write_all(&v.encode()).await?,
+                Err(RecvError::Closed) => {
+                    eprintln!("Channel closed");
+                    break;
+                }
+                Err(RecvError::Lagged(n)) => {
+                    eprintln!("Lagged by {n} messages");
+                    continue;
+                }
+            }
+
+            // collect acks
+            if let Ok(bytes_read) = timeout(Duration::from_millis(100), self.stream.read(buf)).await
+            {
+                let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
+                while decoder.decode().ok().is_some() {
+                    self.config.rep_state.incr_num_ack().await;
                 }
             }
         }
@@ -82,28 +91,29 @@ impl Server {
         let (command, args) = extract_command(cmd_line)?;
         let response = match command {
             Command::PING => Some(Value::String("PONG".into())),
-            Command::ECHO => args.first().cloned(),
-            Command::SET => {
-                let resp = handle_set(args, &self.config.store).await?;
-                if self.config.role == ReplicaType::Leader {
-                    let _ = self.config.tx.send(cmd_line.clone());
-                }
-                Some(resp)
-            }
-            Command::GET => handle_get(args, &self.config.store).await?,
+            Command::ECHO => Some(handle_echo(args)?),
+            Command::SET => Some(handle_set(args, &self.config.store).await?),
+            Command::GET => Some(handle_get(args, &self.config.store).await?),
             Command::INFO => Some(self.handle_info()),
             Command::REPLCONF => Some(Value::String("OK".into())),
             Command::PSYNC => {
-                self.handle_psync().await?;
+                if let Err(e) = self.handle_psync().await {
+                    eprintln!("Error handling PSYNC: {:?}", e);
+                }
                 None
             }
-            Command::WAIT => self.handle_wait(args).await?,
-            Command::CONFIG => self.handle_config(args)?,
+            Command::WAIT => Some(self.handle_wait(args).await?),
+            Command::CONFIG => Some(self.handle_config(args)?),
             Command::KEYS => Some(self.handle_keys(args).await?),
             Command::TYPE => Some(self.handle_type(args).await?),
-            Command::XADD => Some(self.handle_xadd(args).await?),
+            Command::XADD => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRANGE => Some(self.handle_xrange(args).await?),
+            Command::XREAD => Some(self.handle_xread(args).await?),
         };
+
+        if command.is_write() && self.config.role == ReplicaType::Leader {
+            let _ = self.config.tx.send(cmd_line.clone());
+        }
 
         self.config
             .rep_state
@@ -135,15 +145,15 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_wait(&mut self, args: &[Value]) -> Result<Option<Value>> {
+    async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
-            return Ok(None);
+            bail!(InputError::InvalidArgument);
         }
         let limit = unpack_bulk_string(&args[0])?.parse::<usize>()?;
         let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
         if limit == 0 {
-            return Ok(Some(Value::Integer(self.num_followers() as i64)));
+            return Ok(Value::Integer(self.num_followers() as i64));
         }
 
         let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::SET) {
@@ -170,12 +180,12 @@ impl Server {
             num_ack
         };
 
-        Ok(Some(Value::Integer(responded as i64)))
+        Ok(Value::Integer(responded as i64))
     }
 
-    fn handle_config(&self, args: &[Value]) -> Result<Option<Value>> {
+    fn handle_config(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
-            return Ok(None);
+            bail!(InputError::InvalidArgument);
         }
 
         let cmd = unpack_bulk_string(&args[0])?;
@@ -193,18 +203,18 @@ impl Server {
                             .unwrap_or_default(),
                     ),
                     "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
-                    _ => bail!("Invalid CONFIG option"),
+                    option => bail!("Unsupported CONFIG option: {}", option),
                 };
-                Some(Value::Array(vec![Value::Bulk(name.to_string()), value]))
+                Value::Array(vec![Value::Bulk(name.to_string()), value])
             }
-            _ => None,
+            cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
         };
         Ok(res)
     }
 
     async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!("Wrong number of arguments for KEYS command");
+            bail!(InputError::InvalidArgument);
         }
 
         let pattern = unpack_bulk_string(&args[0])?;
@@ -214,7 +224,7 @@ impl Server {
 
     async fn handle_type(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!("Wrong number of arguments for TYPE command");
+            bail!(InputError::InvalidArgument);
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -227,39 +237,9 @@ impl Server {
         Ok(res)
     }
 
-    async fn handle_xadd(&self, args: &[Value]) -> Result<Value> {
-        if args.len() < 2 {
-            bail!("XADD command requires at least 2 arguments");
-        }
-
-        let key = unpack_bulk_string(&args[0])?;
-        let entry_id = unpack_bulk_string(&args[1])?;
-
-        let values = args[2..]
-            .chunks(2)
-            .map(|pair| match pair {
-                [field, value] => Ok((
-                    unpack_bulk_string(field)?.to_string(),
-                    unpack_bulk_string(value)?.to_string(),
-                )),
-                _ => bail!("Incorrect key-value pairs format."),
-            })
-            .collect::<Result<HashMap<_, _>>>()?;
-
-        match self
-            .config
-            .store
-            .add_stream_entry(key, entry_id, values)
-            .await
-        {
-            Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
-            Err(e) => Ok(Value::Error(e.to_string())),
-        }
-    }
-
     async fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
-            bail!("XRANGE command requires at least 3 arguments");
+            bail!(InputError::InvalidArgument);
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -295,6 +275,10 @@ impl Server {
         Ok(Value::Array(values))
     }
 
+    async fn handle_xread(&self, args: &[Value]) -> Result<Value> {
+        todo!()
+    }
+
     fn num_followers(&self) -> usize {
         self.config.tx.receiver_count()
     }
@@ -319,9 +303,17 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
     }
 }
 
+fn handle_echo(args: &[Value]) -> Result<Value> {
+    if args.is_empty() {
+        bail!(InputError::InvalidArgument);
+    } else {
+        Ok(args[0].clone())
+    }
+}
+
 pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!("SET command requires at least 2 arguments");
+        bail!(InputError::InvalidArgument);
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -332,12 +324,15 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
         match option.to_lowercase().as_str() {
             "px" => {
                 let ms = match args.get(3) {
-                    Some(Value::Bulk(arg)) => arg.parse::<u64>().unwrap_or(0),
-                    _ => bail!("Invalid PX option"),
+                    Some(Value::Bulk(arg)) => match arg.parse::<u64>() {
+                        Ok(ms) => ms,
+                        Err(_) => bail!(InputError::InvalidInteger),
+                    },
+                    _ => bail!(InputError::InvalidArgument),
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
-            _ => bail!("Invalid SET option"),
+            option => bail!("Unsupported SET option: {}", option),
         }
     }
 
@@ -345,15 +340,44 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     Ok(Value::String("OK".into()))
 }
 
-pub async fn handle_get(args: &[Value], store: &Store) -> Result<Option<Value>> {
+pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
-        bail!("GET command requires at least 1 argument");
+        bail!(InputError::InvalidArgument);
     }
 
     let key = unpack_bulk_string(&args[0])?;
     match store.get(key).await {
-        Some(RecordType::String(s)) => Ok(Some(Value::Bulk(s.to_string()))),
+        Some(RecordType::String(s)) => Ok(Value::Bulk(s.to_string())),
         Some(RecordType::Stream(_)) => todo!(),
-        None => Ok(Some(Value::Null)),
+        None => Ok(Value::Null),
+    }
+}
+
+pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 2 {
+        bail!(InputError::InvalidArgument);
+    }
+
+    let key = unpack_bulk_string(&args[0])?;
+    let entry_id = unpack_bulk_string(&args[1])?;
+
+    let values = args[2..]
+        .chunks(2)
+        .map(|pair| match pair {
+            [field, value] => Ok((
+                unpack_bulk_string(field)?.to_string(),
+                unpack_bulk_string(value)?.to_string(),
+            )),
+            _ => bail!(InputError::InvalidArgument),
+        })
+        .collect::<Result<HashMap<_, _>>>()?;
+
+    if values.is_empty() {
+        bail!(InputError::InvalidArgument);
+    }
+
+    match store.add_stream_entry(key, entry_id, values).await {
+        Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
+        Err(e) => Ok(Value::Error(e.to_string())),
     }
 }

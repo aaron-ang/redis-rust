@@ -2,7 +2,7 @@ use crate::db::Store;
 use crate::server::{self, EMPTY_RDB_B64};
 use crate::util::Command;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
 use std::io::{BufReader, ErrorKind};
@@ -11,6 +11,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+const BUFFER_SIZE: usize = 1024;
+const PSYNC_RESPONSE_LEN: usize = 56;
 
 pub struct Follower {
     port: u16,
@@ -32,7 +35,7 @@ impl Follower {
     pub async fn handle_conn(&mut self) -> Result<()> {
         self.connect_to_leader().await?;
 
-        let mut buf = vec![0; 1024];
+        let mut buf = vec![0; BUFFER_SIZE];
         loop {
             let bytes_read = self.leader_stream.read(&mut buf).await?;
             if bytes_read == 0 {
@@ -40,31 +43,42 @@ impl Follower {
                 break;
             }
 
-            let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            loop {
-                match decoder.decode() {
-                    Ok(value) => {
-                        let (command, args) = server::extract_command(&value)?;
-                        match command {
-                            Command::PING => {}
-                            Command::SET => {
-                                server::handle_set(args, &self.store)?;
-                            }
-                            Command::GET => {
-                                server::handle_get(args, &self.store)?;
-                            }
-                            Command::REPLCONF => self.handle_replconf().await?,
-                            _ => eprintln!("Unknown command: {}", command),
-                        }
-                        self.offset += value.encode().len();
-                    }
-                    Err(e) => match e.kind() {
-                        ErrorKind::UnexpectedEof => break,
-                        ErrorKind::InvalidInput => continue,
-                        _ => eprintln!("Error: {:?}", e),
-                    },
+            self.process_commands(&buf[..bytes_read]).await?;
+        }
+        Ok(())
+    }
+
+    async fn process_commands(&mut self, data: &[u8]) -> Result<()> {
+        let mut decoder = Decoder::new(BufReader::new(data));
+
+        loop {
+            match decoder.decode() {
+                Ok(value) => {
+                    let (command, args) = server::extract_command(&value)?;
+                    self.handle_command(command, args).await?;
+                    self.offset += value.encode().len();
                 }
+                Err(e) => match e.kind() {
+                    ErrorKind::UnexpectedEof => break,
+                    ErrorKind::InvalidInput => continue,
+                    _ => eprintln!("Error: {:?}", e),
+                },
             }
+        }
+        Ok(())
+    }
+
+    async fn handle_command(&mut self, command: Command, args: &[Value]) -> Result<()> {
+        match command {
+            Command::PING => {}
+            Command::SET => {
+                server::handle_set(args, &self.store)?;
+            }
+            Command::GET => {
+                server::handle_get(args, &self.store)?;
+            }
+            Command::REPLCONF => self.handle_replconf().await?,
+            _ => eprintln!("Unknown command: {}", command),
         }
         Ok(())
     }
@@ -76,92 +90,96 @@ impl Follower {
         Ok(())
     }
 
+    async fn send_command(&mut self, value: Value) -> Result<()> {
+        self.leader_stream.write_all(&value.encode()).await?;
+        Ok(())
+    }
+
+    async fn read_response(&mut self) -> Result<Value> {
+        self.read_response_with_len(0).await
+    }
+
+    async fn read_response_with_len(&mut self, len: usize) -> Result<Value> {
+        let buf_size = if len > 0 { len } else { BUFFER_SIZE };
+        let mut buf = vec![0; buf_size];
+        let bytes_read = self.leader_stream.read(&mut buf).await?;
+        Ok(Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?)
+    }
+
     async fn send_ping(&mut self) -> Result<()> {
         let ping = Value::Array(vec![Value::Bulk(Command::PING.to_string())]);
-        self.leader_stream.write_all(&ping.encode()).await?;
+        self.send_command(ping).await?;
 
-        let mut buf = vec![0; 1024];
-        let bytes_read = self.leader_stream.read(&mut buf).await?;
-        let response = Decoder::new(BufReader::new(&buf[..bytes_read])).decode()?;
-        match response {
-            Value::String(res_str) if res_str == "PONG" => Ok(()),
-            _ => anyhow::bail!("Unexpected response to PING"),
+        match self.read_response().await? {
+            Value::String(res) if res == "PONG" => Ok(()),
+            _ => bail!("Unexpected response to PING"),
         }
     }
 
     async fn send_replconf(&mut self) -> Result<()> {
-        let replconf_port = Value::Array(vec![
+        // Send port configuration
+        let port_cmd = Value::Array(vec![
             Value::Bulk(Command::REPLCONF.to_string()),
             Value::Bulk("listening-port".into()),
             Value::Bulk(self.port.to_string()),
         ]);
-        self.leader_stream
-            .write_all(&replconf_port.encode())
-            .await?;
+        self.send_command(port_cmd).await?;
 
-        let replconf_capa = Value::Array(vec![
+        // Send capabilities
+        let capa_cmd = Value::Array(vec![
             Value::Bulk(Command::REPLCONF.to_string()),
             Value::Bulk("capa".into()),
             Value::Bulk("eof".into()),
         ]);
-        self.leader_stream
-            .write_all(&replconf_capa.encode())
-            .await?;
+        self.send_command(capa_cmd).await?;
 
-        let mut buf = vec![0; 1024];
-        let mut num_ok = 0;
-
-        // check that 2 OK's are received
-        while num_ok < 2 {
-            let bytes_read = self.leader_stream.read(&mut buf).await?;
-            let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            while let Some(response) = decoder.decode().ok() {
-                match response {
-                    Value::String(res_str) if res_str == "OK" => num_ok += 1,
-                    _ => anyhow::bail!("Unexpected response to REPLCONF"),
-                }
+        // Verify responses
+        for _ in 0..2 {
+            match self.read_response().await? {
+                Value::String(res) if res == "OK" => continue,
+                _ => bail!("Unexpected response to REPLCONF"),
             }
         }
         Ok(())
     }
 
     async fn send_psync(&mut self) -> Result<()> {
+        self.request_sync().await?;
+        self.verify_rdb_file().await?;
+        Ok(())
+    }
+
+    async fn request_sync(&mut self) -> Result<()> {
         let psync = Value::Array(vec![
             Value::Bulk(Command::PSYNC.to_string()),
             Value::Bulk("?".into()),
             Value::Bulk("-1".to_string()),
         ]);
-        self.leader_stream.write_all(&psync.encode()).await?;
+        self.send_command(psync).await?;
 
-        let mut psync_buf = vec![0; 56]; // length of PSYNC response
-        self.leader_stream.read_exact(&mut psync_buf).await?;
-
-        let mut decoder = Decoder::new(BufReader::new(&psync_buf[..]));
-        if let Value::String(res_str) = decoder.decode().unwrap() {
-            let sync = res_str.split_ascii_whitespace().collect::<Vec<&str>>();
-            if sync.len() < 3 || sync[0] != "FULLRESYNC" {
-                anyhow::bail!("Unexpected response to PSYNC: {}", res_str);
+        match self.read_response_with_len(PSYNC_RESPONSE_LEN).await? {
+            Value::String(res_str) => {
+                let sync: Vec<&str> = res_str.split_ascii_whitespace().collect();
+                if sync.len() < 3 || sync[0] != "FULLRESYNC" {
+                    bail!("Unexpected response to PSYNC: {}", res_str);
+                }
+                self.offset = sync[2].parse()?;
+                Ok(())
             }
-            self.offset = sync.last().unwrap().parse::<usize>()?;
-        } else {
-            anyhow::bail!("Unexpected response to PSYNC");
+            _ => bail!("Invalid PSYNC response format"),
         }
+    }
 
-        // verify RDB file
-        let mut rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64).unwrap();
+    async fn verify_rdb_file(&mut self) -> Result<()> {
+        let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
         let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
-        msg_bytes.append(&mut rdb);
+        msg_bytes.append(&mut rdb.to_vec());
 
         let mut rdb_buf = vec![0; msg_bytes.len()];
         self.leader_stream.read_exact(&mut rdb_buf).await?;
 
-        if rdb_buf != msg_bytes.as_slice() {
-            eprintln!("Received RDB: {:?}", String::from_utf8_lossy(&rdb_buf));
-            eprintln!(
-                "Expected RDB: {:?}",
-                String::from_utf8_lossy(msg_bytes.as_slice())
-            );
-            anyhow::bail!("Unexpected RDB file");
+        if rdb_buf != msg_bytes {
+            bail!("RDB file verification failed");
         }
         Ok(())
     }
@@ -172,7 +190,6 @@ impl Follower {
             Value::Bulk("ACK".into()),
             Value::Bulk(self.offset.to_string()),
         ]);
-        self.leader_stream.write_all(&replconf_ack.encode()).await?;
-        Ok(())
+        self.send_command(replconf_ack).await
     }
 }

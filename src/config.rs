@@ -5,6 +5,10 @@ use tokio::sync::broadcast::{self, Sender};
 use crate::util::{ReplicaType, ReplicationState};
 use crate::Store;
 
+const DEFAULT_DIR: &str = ".";
+const DEFAULT_DBFILE: &str = "dump.rdb";
+const BROADCAST_CHANNEL_SIZE: usize = 16;
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -24,17 +28,16 @@ impl Config {
         store: Arc<Store>,
         role: ReplicaType,
     ) -> Self {
-        let (tx, _rx): (Sender<Value>, _) = broadcast::channel(16);
-        let tx = Arc::new(tx);
-        let rep_state = Arc::new(ReplicationState::new());
-        Self {
+        let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
+
+        Config {
             port,
-            dir: dir.unwrap_or_else(|| PathBuf::from(".")),
-            dbfilename: dbfilename.unwrap_or_else(|| "dump.rdb".to_string()),
+            dir: dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),
+            dbfilename: dbfilename.unwrap_or_else(|| DEFAULT_DBFILE.to_string()),
             store,
             role,
-            tx,
-            rep_state,
+            tx: Arc::new(tx),
+            rep_state: Arc::new(ReplicationState::new()),
         }
     }
 }

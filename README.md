@@ -17,6 +17,7 @@ uncomment the relevant code, and push your changes to pass the first stage:
 
 ```sh
 git commit -am "pass 1st stage" # any msg
+git commit -am "pass 1st stage" # any msg
 git push origin master
 ```
 

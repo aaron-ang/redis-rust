@@ -1,11 +1,15 @@
 use anyhow::Result;
-use std::{collections::HashMap, str::FromStr, time::SystemTime};
+use std::{
+    collections::{BTreeMap, HashMap},
+    str::FromStr,
+    time::SystemTime,
+};
 
 #[derive(Clone)]
 pub struct StreamRecord {
     id: String,
     top_entry_id: StreamEntryId,
-    value: HashMap<StreamEntryId, HashMap<String, String>>,
+    value: BTreeMap<StreamEntryId, HashMap<String, String>>,
 }
 
 impl StreamRecord {
@@ -13,7 +17,7 @@ impl StreamRecord {
         Self {
             id,
             top_entry_id: StreamEntryId::default(),
-            value: HashMap::new(),
+            value: BTreeMap::new(),
         }
     }
 
@@ -26,6 +30,17 @@ impl StreamRecord {
         self.validate_entry_id(&entry_id)?;
         self.value.insert(entry_id.clone(), values);
         Ok(entry_id)
+    }
+
+    pub fn xrange(
+        &self,
+        start: StreamEntryId,
+        end: StreamEntryId,
+    ) -> Vec<(StreamEntryId, HashMap<String, String>)> {
+        self.value
+            .range(start..=end)
+            .map(|(id, values)| (id.clone(), values.clone()))
+            .collect()
     }
 
     fn generate_entry_id(&self, entry_id: &str) -> Result<StreamEntryId> {
@@ -73,7 +88,7 @@ impl StreamRecord {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StreamEntryId {
     ts_ms: u128,
     seq_no: u64,
@@ -82,6 +97,16 @@ pub struct StreamEntryId {
 impl StreamEntryId {
     fn new(ts_ms: u128, seq_no: u64) -> Self {
         Self { ts_ms, seq_no }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.split_once('-') {
+            Some((ts_ms_str, seq_no_str)) => Ok(Self {
+                ts_ms: ts_ms_str.parse()?,
+                seq_no: seq_no_str.parse()?,
+            }),
+            None => Ok(Self::new(s.parse()?, 0)),
+        }
     }
 }
 

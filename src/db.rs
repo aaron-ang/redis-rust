@@ -121,12 +121,12 @@ impl Store {
             .entry(key.to_string())
             .or_insert_with(|| RedisData::new_stream(key.to_string()));
 
-        if stream_data.is_expired() || !matches!(stream_data.record, RecordType::String(_)) {
+        if stream_data.is_expired() || matches!(stream_data.record, RecordType::String(_)) {
             *stream_data = RedisData::new_stream(key.to_string());
         }
 
         if let RecordType::Stream(stream) = &mut stream_data.record {
-            stream.xadd(entry_id, values).await
+            stream.xadd(entry_id, values)
         } else {
             unreachable!("Stream data is not a Stream record");
         }

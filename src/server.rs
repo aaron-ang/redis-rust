@@ -102,6 +102,7 @@ impl Server {
             Command::KEYS => Some(self.handle_keys(args).await?),
             Command::TYPE => Some(self.handle_type(args).await?),
             Command::XADD => Some(self.handle_xadd(args).await?),
+            Command::XRANGE => Some(self.handle_xrange(args).await?),
         };
 
         self.config
@@ -162,7 +163,7 @@ impl Server {
                 if Instant::now() >= end_time || curr_acks >= limit {
                     break curr_acks;
                 }
-                sleep(Duration::from_millis(100)).await;
+                sleep(Duration::from_millis(50)).await;
             };
 
             self.config.rep_state.reset().await;
@@ -227,7 +228,7 @@ impl Server {
     }
 
     async fn handle_xadd(&self, args: &[Value]) -> Result<Value> {
-        if args.len() < 3 {
+        if args.len() < 2 {
             bail!("XADD command requires at least 2 arguments");
         }
 
@@ -254,6 +255,44 @@ impl Server {
             Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
             Err(e) => Ok(Value::Error(e.to_string())),
         }
+    }
+
+    async fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 3 {
+            bail!("XRANGE command requires at least 3 arguments");
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let start = unpack_bulk_string(&args[1])?;
+        let end = unpack_bulk_string(&args[2])?;
+
+        let entries = self
+            .config
+            .store
+            .get_stream_entries(key, start, end)
+            .await?;
+
+        let values = entries
+            .iter()
+            .map(|(id, fields)| {
+                Value::Array(vec![
+                    Value::Bulk(id.to_string()),
+                    Value::Array(
+                        fields
+                            .into_iter()
+                            .flat_map(|(field, value)| {
+                                vec![
+                                    Value::Bulk(field.to_string()),
+                                    Value::Bulk(value.to_string()),
+                                ]
+                            })
+                            .collect(),
+                    ),
+                ])
+            })
+            .collect();
+
+        Ok(Value::Array(values))
     }
 
     fn num_followers(&self) -> usize {

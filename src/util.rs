@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use crate::db::{RecordType, RedisData, Store};
 
 #[derive(Clone, Copy, PartialEq, Display, EnumString)]
+#[strum(ascii_case_insensitive)]
 pub enum Command {
     PING,
     ECHO,
@@ -24,6 +25,7 @@ pub enum Command {
     KEYS,
     TYPE,
     XADD,
+    XRANGE,
 }
 
 #[derive(Clone, Copy, PartialEq, Display)]

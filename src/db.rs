@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use glob::Pattern;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::SystemTime};
 use tokio::sync::RwLock;
@@ -129,6 +129,27 @@ impl Store {
             stream.xadd(entry_id, values)
         } else {
             unreachable!("Stream data is not a Stream record");
+        }
+    }
+
+    pub async fn get_stream_entries(
+        &self,
+        key: &str,
+        start: &str,
+        end: &str,
+    ) -> Result<Vec<(StreamEntryId, HashMap<String, String>)>> {
+        let storage = self.entries.read().await;
+        let stream_data = storage
+            .get(key)
+            .ok_or_else(|| anyhow::anyhow!("ERR no such key"))?;
+
+        let start = StreamEntryId::parse(start)?;
+        let end = StreamEntryId::parse(end)?;
+
+        if let RecordType::Stream(stream) = &stream_data.record {
+            Ok(stream.xrange(start, end))
+        } else {
+            bail!("ERR Operation against a key holding the wrong kind of value");
         }
     }
 }

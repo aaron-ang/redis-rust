@@ -271,20 +271,24 @@ impl Server {
         }
 
         anyhow::ensure!(
-            unpack_bulk_string(&args[0])?.to_lowercase() == "streams",
-            "Expected streams keyword"
+            unpack_bulk_string(&args[0])?.eq_ignore_ascii_case("streams"),
+            "Expected STREAMS keyword"
         );
 
-        let streams: Vec<(&str, &str)> = args[1..]
-            .chunks(2)
-            .map(|pair| {
-                if let [key, id] = pair {
-                    Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?))
-                } else {
-                    bail!(InputError::InvalidArgument)
-                }
-            })
-            .collect::<Result<_>>()?;
+        let stream_args = &args[1..];
+        if stream_args.len() % 2 != 0 {
+            bail!(InputError::InvalidArgument);
+        }
+
+        let mid = stream_args.len() / 2;
+        let keys = &stream_args[..mid];
+        let ids = &stream_args[mid..];
+
+        let streams = keys
+            .iter()
+            .zip(ids)
+            .map(|(key, id)| Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?)))
+            .collect::<Result<Vec<_>>>()?;
 
         let entries = self.config.store.get_bulk_stream_entries(&streams).await?;
         let values = entries

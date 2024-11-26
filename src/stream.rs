@@ -34,9 +34,18 @@ impl StreamRecord {
 
     pub fn xrange(
         &self,
-        start: StreamEntryId,
+        mut start: StreamEntryId,
         end: StreamEntryId,
+        start_exclusive: bool,
     ) -> Vec<(StreamEntryId, HashMap<String, String>)> {
+        if start_exclusive {
+            start = self
+                .value
+                .range(start..)
+                .next()
+                .map(|(id, _)| id.clone())
+                .unwrap_or(StreamEntryId::MAX);
+        }
         self.value
             .range(start..=end)
             .map(|(id, values)| (id.clone(), values.clone()))
@@ -108,7 +117,7 @@ impl StreamEntryId {
 
     pub fn parse_end_range(s: &str) -> Result<Self> {
         match s {
-            "+" => Ok(Self::max()),
+            "+" => Ok(Self::MAX),
             _ => Self::parse_range(s),
         }
     }
@@ -123,9 +132,10 @@ impl StreamEntryId {
         }
     }
 
-    fn max() -> Self {
-        Self::new(u128::MAX, u64::MAX)
-    }
+    pub const MAX: Self = Self {
+        ts_ms: u128::MAX,
+        seq_no: u64::MAX,
+    };
 }
 
 impl ToString for StreamEntryId {

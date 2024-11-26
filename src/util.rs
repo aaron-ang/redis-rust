@@ -44,6 +44,8 @@ pub enum InputError {
     InvalidInteger,
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
+    #[error("Invalid entry ID format")]
+    InvalidEntryId,
 }
 
 #[derive(Clone, PartialEq, Display)]

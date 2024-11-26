@@ -45,11 +45,10 @@ impl Server {
 
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Some(cmd_line) = decoder.decode().ok() {
-                if let Some(response) = self
-                    .process(&cmd_line)
-                    .await
-                    .unwrap_or_else(|e| Some(Value::Error(e.to_string())))
-                {
+                if let Some(response) = self.process(&cmd_line).await.unwrap_or_else(|e| {
+                    eprint!("Error processing command: {e}");
+                    Some(Value::Error(e.to_string()))
+                }) {
                     self.stream.write_all(&response.encode()).await?;
                 }
             }
@@ -254,14 +253,18 @@ impl Server {
         let start = unpack_bulk_string(&args[1])?;
         let end = unpack_bulk_string(&args[2])?;
 
-        let entries = self
+        let stream_entries = self
             .config
             .store
             .get_range_stream_entries(key, start, end)
             .await?;
-        let values = build_stream_entry_list(entries);
 
-        Ok(Value::Array(values))
+        if stream_entries.is_empty() {
+            Ok(Value::Null)
+        } else {
+            let values = build_stream_entry_list(stream_entries);
+            Ok(Value::Array(values))
+        }
     }
 
     // XREAD [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
@@ -270,12 +273,24 @@ impl Server {
             bail!(InputError::InvalidArgument);
         }
 
-        anyhow::ensure!(
-            unpack_bulk_string(&args[0])?.eq_ignore_ascii_case("streams"),
-            "Expected STREAMS keyword"
-        );
+        let mut block_ms = 0;
+        let mut args_iter = args.iter();
 
-        let stream_args = &args[1..];
+        loop {
+            match args_iter.next() {
+                Some(Value::Bulk(b)) if b.to_lowercase() == "block" => {
+                    if let Some(Value::Bulk(ms)) = args_iter.next() {
+                        block_ms = ms.parse()?;
+                    } else {
+                        bail!(InputError::InvalidArgument);
+                    }
+                }
+                Some(Value::Bulk(b)) if b.to_lowercase() == "streams" => break,
+                _ => bail!(InputError::InvalidArgument),
+            }
+        }
+
+        let stream_args = args_iter.collect::<Vec<_>>();
         if stream_args.len() % 2 != 0 {
             bail!(InputError::InvalidArgument);
         }
@@ -290,16 +305,24 @@ impl Server {
             .map(|(key, id)| Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?)))
             .collect::<Result<Vec<_>>>()?;
 
-        let entries = self.config.store.get_bulk_stream_entries(&streams).await?;
-        let values = entries
-            .into_iter()
-            .map(|(key, stream)| {
-                let inner = build_stream_entry_list(stream);
-                Value::Array(vec![Value::Bulk(key), Value::Array(inner)])
-            })
-            .collect();
+        let entries = self
+            .config
+            .store
+            .get_bulk_stream_entries(&streams, block_ms)
+            .await?;
 
-        Ok(Value::Array(values))
+        if entries.is_empty() {
+            Ok(Value::Null)
+        } else {
+            let values = entries
+                .into_iter()
+                .map(|(key, stream)| {
+                    let inner = build_stream_entry_list(stream);
+                    Value::Array(vec![Value::Bulk(key), Value::Array(inner)])
+                })
+                .collect::<Vec<_>>();
+            Ok(Value::Array(values))
+        }
     }
 
     fn count_active_replicas(&self) -> usize {

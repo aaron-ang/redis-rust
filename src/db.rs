@@ -4,7 +4,7 @@ use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::SystemTime};
 use tokio::sync::RwLock;
 
 use crate::stream::{StreamEntryId, StreamRecord};
-use crate::util::{Instance, StringRecord};
+use crate::util::{InputError, Instance, StringRecord};
 
 #[derive(Clone)]
 pub enum RecordType {
@@ -121,18 +121,18 @@ impl Store {
             .entry(key.to_string())
             .or_insert_with(|| RedisData::new_stream(key.to_string()));
 
-        if stream_data.is_expired() || matches!(stream_data.record, RecordType::String(_)) {
+        if stream_data.is_expired() || !matches!(stream_data.record, RecordType::Stream(_)) {
             *stream_data = RedisData::new_stream(key.to_string());
         }
 
         if let RecordType::Stream(stream) = &mut stream_data.record {
             stream.xadd(entry_id, values)
         } else {
-            unreachable!("Stream data is not a Stream record");
+            bail!(InputError::WrongType);
         }
     }
 
-    pub async fn get_stream_entries(
+    pub async fn get_range_stream_entries(
         &self,
         key: &str,
         start: &str,
@@ -147,9 +147,31 @@ impl Store {
         let end = StreamEntryId::parse_end_range(end)?;
 
         if let RecordType::Stream(stream) = &stream_data.record {
-            Ok(stream.xrange(start, end))
+            Ok(stream.xrange(start, end, false))
         } else {
-            bail!("ERR Operation against a key holding the wrong kind of value");
+            bail!(InputError::WrongType);
         }
+    }
+
+    pub async fn get_bulk_stream_entries(
+        &self,
+        streams: &[(&str, &str)],
+    ) -> Result<Vec<(String, Vec<(StreamEntryId, HashMap<String, String>)>)>> {
+        let mut res = vec![];
+        let storage = self.entries.read().await;
+        for (key, start) in streams {
+            let Some(stream) = storage.get(*key) else {
+                continue;
+            };
+            let RecordType::Stream(ref stream) = &stream.record else {
+                bail!(InputError::WrongType);
+            };
+            let start = StreamEntryId::parse_start_range(start)?;
+            res.push((
+                key.to_string(),
+                stream.xrange(start, StreamEntryId::MAX, true),
+            ));
+        }
+        Ok(res)
     }
 }

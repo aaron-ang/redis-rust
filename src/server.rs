@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::db::{RecordType, Store};
+use crate::stream::StreamEntryId;
 use crate::util::{Command, InputError, ReplicaType};
 
 use anyhow::{bail, Result};
@@ -45,7 +46,7 @@ impl Server {
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Some(cmd_line) = decoder.decode().ok() {
                 if let Some(response) = self
-                    .execute(&cmd_line)
+                    .process(&cmd_line)
                     .await
                     .unwrap_or_else(|e| Some(Value::Error(e.to_string())))
                 {
@@ -75,7 +76,7 @@ impl Server {
                 }
             }
 
-            // collect acks
+            // Collect acks
             if let Ok(bytes_read) = timeout(Duration::from_millis(100), self.stream.read(buf)).await
             {
                 let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
@@ -87,7 +88,7 @@ impl Server {
         Ok(())
     }
 
-    pub async fn execute(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
+    pub async fn process(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
         let (command, args) = extract_command(cmd_line)?;
         let response = match command {
             Command::PING => Some(Value::String("PONG".into())),
@@ -123,6 +124,7 @@ impl Server {
         Ok(response)
     }
 
+    // INFO
     fn handle_info(&self) -> Value {
         let value = format!(
             "role:{}\r\nmaster_replid:{REPL_ID}\r\nmaster_repl_offset:{REPL_OFFSET}",
@@ -131,6 +133,7 @@ impl Server {
         Value::Bulk(value)
     }
 
+    // PSYNC replicationid offset
     async fn handle_psync(&mut self) -> Result<()> {
         let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
         self.stream.write_all(&msg.encode()).await?;
@@ -145,20 +148,21 @@ impl Server {
         Ok(())
     }
 
+    // WAIT numreplicas timeout
     async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
             bail!(InputError::InvalidArgument);
         }
-        let limit = unpack_bulk_string(&args[0])?.parse::<usize>()?;
+        let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
         let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
-        if limit == 0 {
-            return Ok(Value::Integer(self.num_followers() as i64));
+        if num_replicas == 0 {
+            return Ok(Value::Integer(self.count_active_replicas() as i64));
         }
 
         let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::SET) {
             sleep(Duration::from_millis(timeout_ms)).await;
-            self.num_followers()
+            self.count_active_replicas()
         } else {
             let repl_getack = Value::Array(vec![
                 Value::Bulk("REPLCONF".into()),
@@ -170,7 +174,7 @@ impl Server {
             let end_time = Instant::now() + Duration::from_millis(timeout_ms);
             let num_ack = loop {
                 let curr_acks = self.config.rep_state.get_num_ack().await;
-                if Instant::now() >= end_time || curr_acks >= limit {
+                if Instant::now() >= end_time || curr_acks >= num_replicas {
                     break curr_acks;
                 }
                 sleep(Duration::from_millis(50)).await;
@@ -183,6 +187,7 @@ impl Server {
         Ok(Value::Integer(responded as i64))
     }
 
+    // CONFIG GET parameter
     fn handle_config(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
             bail!(InputError::InvalidArgument);
@@ -212,6 +217,7 @@ impl Server {
         Ok(res)
     }
 
+    // KEYS pattern
     async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
             bail!(InputError::InvalidArgument);
@@ -222,6 +228,7 @@ impl Server {
         Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
     }
 
+    // TYPE key
     async fn handle_type(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
             bail!(InputError::InvalidArgument);
@@ -237,6 +244,7 @@ impl Server {
         Ok(res)
     }
 
+    // XRANGE key start end
     async fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
             bail!(InputError::InvalidArgument);
@@ -249,39 +257,72 @@ impl Server {
         let entries = self
             .config
             .store
-            .get_stream_entries(key, start, end)
+            .get_range_stream_entries(key, start, end)
             .await?;
+        let values = build_stream_entry_list(entries);
 
+        Ok(Value::Array(values))
+    }
+
+    // XREAD [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
+    async fn handle_xread(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 3 {
+            bail!(InputError::InvalidArgument);
+        }
+
+        anyhow::ensure!(
+            unpack_bulk_string(&args[0])?.to_lowercase() == "streams",
+            "Expected streams keyword"
+        );
+
+        let streams: Vec<(&str, &str)> = args[1..]
+            .chunks(2)
+            .map(|pair| {
+                if let [key, id] = pair {
+                    Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?))
+                } else {
+                    bail!(InputError::InvalidArgument)
+                }
+            })
+            .collect::<Result<_>>()?;
+
+        let entries = self.config.store.get_bulk_stream_entries(&streams).await?;
         let values = entries
-            .iter()
-            .map(|(id, fields)| {
-                Value::Array(vec![
-                    Value::Bulk(id.to_string()),
-                    Value::Array(
-                        fields
-                            .into_iter()
-                            .flat_map(|(field, value)| {
-                                vec![
-                                    Value::Bulk(field.to_string()),
-                                    Value::Bulk(value.to_string()),
-                                ]
-                            })
-                            .collect(),
-                    ),
-                ])
+            .into_iter()
+            .map(|(key, stream)| {
+                let inner = build_stream_entry_list(stream);
+                Value::Array(vec![Value::Bulk(key), Value::Array(inner)])
             })
             .collect();
 
         Ok(Value::Array(values))
     }
 
-    async fn handle_xread(&self, args: &[Value]) -> Result<Value> {
-        todo!()
-    }
-
-    fn num_followers(&self) -> usize {
+    fn count_active_replicas(&self) -> usize {
         self.config.tx.receiver_count()
     }
+}
+
+fn build_stream_entry_list(entries: Vec<(StreamEntryId, HashMap<String, String>)>) -> Vec<Value> {
+    entries
+        .iter()
+        .map(|(id, fields)| {
+            Value::Array(vec![
+                Value::Bulk(id.to_string()),
+                Value::Array(
+                    fields
+                        .iter()
+                        .flat_map(|(field, value)| {
+                            vec![
+                                Value::Bulk(field.to_string()),
+                                Value::Bulk(value.to_string()),
+                            ]
+                        })
+                        .collect(),
+                ),
+            ])
+        })
+        .collect()
 }
 
 pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
@@ -303,6 +344,7 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
     }
 }
 
+// ECHO message
 fn handle_echo(args: &[Value]) -> Result<Value> {
     if args.is_empty() {
         bail!(InputError::InvalidArgument);
@@ -311,6 +353,7 @@ fn handle_echo(args: &[Value]) -> Result<Value> {
     }
 }
 
+// SET key value [PX milliseconds]
 pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
         bail!(InputError::InvalidArgument);
@@ -340,6 +383,7 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     Ok(Value::String("OK".into()))
 }
 
+// GET key
 pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
         bail!(InputError::InvalidArgument);
@@ -353,6 +397,7 @@ pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     }
 }
 
+// XADD key <* | id> field value [field value ...]
 pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
         bail!(InputError::InvalidArgument);

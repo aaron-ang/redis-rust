@@ -42,9 +42,11 @@ pub enum InputError {
     InvalidArgument,
     #[error("value is not an integer or out of range")]
     InvalidInteger,
+    #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
+    WrongType,
 }
 
-#[derive(Clone, Copy, PartialEq, Display)]
+#[derive(Clone, PartialEq, Display)]
 pub enum ReplicaType {
     #[strum(serialize = "master")]
     Leader,

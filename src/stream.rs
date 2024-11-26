@@ -1,14 +1,17 @@
 use anyhow::Result;
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     str::FromStr,
     time::SystemTime,
 };
 
+use crate::util::InputError;
+
 #[derive(Clone)]
 pub struct StreamRecord {
     id: String,
-    top_entry_id: StreamEntryId,
+    last_entry_id: StreamEntryId,
     value: BTreeMap<StreamEntryId, HashMap<String, String>>,
 }
 
@@ -16,7 +19,7 @@ impl StreamRecord {
     pub fn new(id: String) -> Self {
         Self {
             id,
-            top_entry_id: StreamEntryId::default(),
+            last_entry_id: StreamEntryId::default(),
             value: BTreeMap::new(),
         }
     }
@@ -34,20 +37,13 @@ impl StreamRecord {
 
     pub fn xrange(
         &self,
-        mut start: StreamEntryId,
-        end: StreamEntryId,
+        start: &StreamEntryId,
+        end: &StreamEntryId,
         start_exclusive: bool,
     ) -> Vec<(StreamEntryId, HashMap<String, String>)> {
-        if start_exclusive {
-            start = self
-                .value
-                .range(start..)
-                .next()
-                .map(|(id, _)| id.clone())
-                .unwrap_or(StreamEntryId::MAX);
-        }
         self.value
             .range(start..=end)
+            .filter(|(id, _)| !start_exclusive || *id > start)
             .map(|(id, values)| (id.clone(), values.clone()))
             .collect()
     }
@@ -57,9 +53,9 @@ impl StreamRecord {
             let ts_ms = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)?
                 .as_millis();
-            let seq_num = match ts_ms.cmp(&self.top_entry_id.ts_ms) {
+            let seq_num = match ts_ms.cmp(&self.last_entry_id.ts_ms) {
                 std::cmp::Ordering::Less => todo!(),
-                std::cmp::Ordering::Equal => self.top_entry_id.seq_no + 1,
+                std::cmp::Ordering::Equal => self.last_entry_id.seq_no + 1,
                 std::cmp::Ordering::Greater => 0,
             };
             return Ok(StreamEntryId::new(ts_ms, seq_num));
@@ -67,14 +63,14 @@ impl StreamRecord {
 
         let (ts_str, seq_no_str) = entry_id
             .split_once('-')
-            .ok_or_else(|| anyhow::anyhow!("Invalid entry ID format"))?;
+            .ok_or_else(|| anyhow::anyhow!(InputError::InvalidEntryId))?;
 
         if seq_no_str == "*" {
             let ts_ms = ts_str.parse::<u128>()?;
-            if ts_ms < self.top_entry_id.ts_ms {
+            if ts_ms < self.last_entry_id.ts_ms {
                 anyhow::bail!("ERR The ID specified in XADD must be greater than the last one");
-            } else if ts_ms == self.top_entry_id.ts_ms {
-                Ok(StreamEntryId::new(ts_ms, self.top_entry_id.seq_no + 1))
+            } else if ts_ms == self.last_entry_id.ts_ms {
+                Ok(StreamEntryId::new(ts_ms, self.last_entry_id.seq_no + 1))
             } else {
                 Ok(StreamEntryId::new(ts_ms, 0))
             }
@@ -84,7 +80,7 @@ impl StreamRecord {
     }
 
     fn validate_entry_id(&mut self, entry_id: &StreamEntryId) -> Result<()> {
-        if entry_id <= &self.top_entry_id {
+        if entry_id <= &self.last_entry_id {
             let err_msg = if entry_id == &StreamEntryId::default() {
                 "ERR The ID specified in XADD must be greater than 0-0"
             } else {
@@ -92,12 +88,12 @@ impl StreamRecord {
             };
             anyhow::bail!(err_msg);
         }
-        self.top_entry_id = entry_id.clone();
+        self.last_entry_id = entry_id.clone();
         Ok(())
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
 pub struct StreamEntryId {
     ts_ms: u128,
     seq_no: u64,
@@ -138,6 +134,15 @@ impl StreamEntryId {
     };
 }
 
+impl Ord for StreamEntryId {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match self.ts_ms.cmp(&other.ts_ms) {
+            Ordering::Equal => self.seq_no.cmp(&other.seq_no),
+            ord => ord,
+        }
+    }
+}
+
 impl ToString for StreamEntryId {
     fn to_string(&self) -> String {
         format!("{}-{}", self.ts_ms, self.seq_no)
@@ -150,7 +155,7 @@ impl FromStr for StreamEntryId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (ts_str, seq_no_str) = s
             .split_once('-')
-            .ok_or_else(|| anyhow::anyhow!("Invalid entry ID format"))?;
+            .ok_or_else(|| anyhow::anyhow!(InputError::InvalidEntryId))?;
 
         let ts = ts_str.parse()?;
         let seq_no = seq_no_str.parse()?;
@@ -162,5 +167,45 @@ impl FromStr for StreamEntryId {
 impl Default for StreamEntryId {
     fn default() -> Self {
         Self::new(0, 0)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stream_entry_id_ordering() {
+        let id1 = StreamEntryId {
+            ts_ms: 100,
+            seq_no: 1,
+        };
+        let id2 = StreamEntryId {
+            ts_ms: 200,
+            seq_no: 1,
+        };
+        let id3 = StreamEntryId {
+            ts_ms: 50,
+            seq_no: 2,
+        };
+        let id4 = StreamEntryId {
+            ts_ms: 50,
+            seq_no: 1,
+        };
+
+        assert!(id3 < id1);
+        assert!(id3 < id2);
+        assert!(id4 < id1);
+        assert!(id4 < id2);
+        assert!(id4 < id1);
+
+        let mut map: BTreeMap<StreamEntryId, String> = BTreeMap::new();
+        map.insert(id3.clone(), "id3".to_string());
+        map.insert(id1.clone(), "id1".to_string());
+        map.insert(id2.clone(), "id2".to_string());
+        map.insert(id4.clone(), "id4".to_string());
+
+        let keys: Vec<_> = map.keys().cloned().collect();
+        assert_eq!(keys, vec![id4, id3, id1, id2]);
     }
 }

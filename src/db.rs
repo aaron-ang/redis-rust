@@ -1,7 +1,10 @@
 use anyhow::{bail, Result};
 use glob::Pattern;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::SystemTime};
-use tokio::sync::RwLock;
+use tokio::{
+    sync::RwLock,
+    time::{sleep, Duration},
+};
 
 use crate::stream::{StreamEntryId, StreamRecord};
 use crate::util::{InputError, Instance, StringRecord};
@@ -147,7 +150,7 @@ impl Store {
         let end = StreamEntryId::parse_end_range(end)?;
 
         if let RecordType::Stream(stream) = &stream_data.record {
-            Ok(stream.xrange(start, end, false))
+            Ok(stream.xrange(&start, &end, false))
         } else {
             bail!(InputError::WrongType);
         }
@@ -156,7 +159,9 @@ impl Store {
     pub async fn get_bulk_stream_entries(
         &self,
         streams: &[(&str, &str)],
+        block_ms: usize,
     ) -> Result<Vec<(String, Vec<(StreamEntryId, HashMap<String, String>)>)>> {
+        sleep(Duration::from_millis(block_ms as u64)).await;
         let mut res = vec![];
         let storage = self.entries.read().await;
         for (key, start) in streams {
@@ -166,11 +171,11 @@ impl Store {
             let RecordType::Stream(ref stream) = &stream.record else {
                 bail!(InputError::WrongType);
             };
-            let start = StreamEntryId::parse_start_range(start)?;
-            res.push((
-                key.to_string(),
-                stream.xrange(start, StreamEntryId::MAX, true),
-            ));
+            let start = StreamEntryId::parse_start_range(*start)?;
+            let range_entries = stream.xrange(&start, &StreamEntryId::MAX, true);
+            if !range_entries.is_empty() {
+                res.push((key.to_string(), range_entries));
+            }
         }
         Ok(res)
     }

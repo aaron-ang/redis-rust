@@ -11,7 +11,7 @@ use crate::util::RedisError;
 
 #[derive(Clone)]
 pub struct StreamRecord {
-    id: String,
+    stream_id: String,
     value: StreamValue,
     last_entry_id: StreamEntryId,
     listeners: HashMap<StreamEntryId, Vec<mpsc::Sender<(String, StreamValue)>>>,
@@ -20,11 +20,15 @@ pub struct StreamRecord {
 impl StreamRecord {
     pub fn new(id: String) -> Self {
         Self {
-            id,
+            stream_id: id,
             value: StreamValue(BTreeMap::new()),
             last_entry_id: StreamEntryId::default(),
             listeners: HashMap::new(),
         }
+    }
+
+    pub fn last_entry_id(&self) -> StreamEntryId {
+        self.last_entry_id
     }
 
     pub async fn xadd(
@@ -33,18 +37,18 @@ impl StreamRecord {
         values: HashMap<String, String>,
     ) -> Result<StreamEntryId> {
         let entry_id = self.generate_entry_id(entry_id_str)?;
-        self.validate_entry_id(&entry_id)?;
-        self.value.0.insert(entry_id.clone(), values.clone());
+        self.validate_entry_id(entry_id)?;
+        self.value.0.insert(entry_id, values.clone());
 
         self.listeners.retain(|expected_id, senders| {
             if entry_id >= *expected_id {
                 let message = (
-                    self.id.clone(),
-                    StreamValue([(entry_id.clone(), values.clone())].into()),
+                    self.stream_id.clone(),
+                    StreamValue([(entry_id, values.clone())].into()),
                 );
-                senders.iter().for_each(|tx| {
+                for tx in senders {
                     let _ = tx.try_send(message.clone());
-                });
+                }
                 false
             } else {
                 true
@@ -56,16 +60,16 @@ impl StreamRecord {
 
     pub fn xrange(
         &self,
-        start: &StreamEntryId,
-        end: &StreamEntryId,
+        start: StreamEntryId,
+        end: StreamEntryId,
         start_exclusive: bool,
     ) -> StreamValue {
         let result: BTreeMap<StreamEntryId, HashMap<String, String>> = self
             .value
             .0
             .range(start..=end)
-            .filter(|&(id, _)| !start_exclusive || id > start)
-            .map(|(id, value)| (id.clone(), value.clone()))
+            .filter(|&(id, _)| !start_exclusive || *id > start)
+            .map(|(id, value)| (*id, value.clone()))
             .collect();
         StreamValue(result)
     }
@@ -101,16 +105,16 @@ impl StreamRecord {
         }
     }
 
-    fn validate_entry_id(&mut self, entry_id: &StreamEntryId) -> Result<()> {
-        if entry_id <= &self.last_entry_id {
-            let err_msg = if entry_id == &StreamEntryId::default() {
+    fn validate_entry_id(&mut self, entry_id: StreamEntryId) -> Result<()> {
+        if entry_id <= self.last_entry_id {
+            let err_msg = if entry_id == StreamEntryId::default() {
                 RedisError::XAddIdTooSmall
             } else {
                 RedisError::XAddIdInvalidSequence
             };
             anyhow::bail!(err_msg);
         }
-        self.last_entry_id = entry_id.clone();
+        self.last_entry_id = entry_id;
         Ok(())
     }
 
@@ -132,7 +136,7 @@ impl StreamValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
 pub struct StreamEntryId {
     ts_ms: u128,
     seq_no: u64,
@@ -239,10 +243,10 @@ mod tests {
         assert!(id4 < id1);
 
         let mut map: BTreeMap<StreamEntryId, String> = BTreeMap::new();
-        map.insert(id3.clone(), "id3".to_string());
-        map.insert(id1.clone(), "id1".to_string());
-        map.insert(id2.clone(), "id2".to_string());
-        map.insert(id4.clone(), "id4".to_string());
+        map.insert(id3, "id3".to_string());
+        map.insert(id1, "id1".to_string());
+        map.insert(id2, "id2".to_string());
+        map.insert(id4, "id4".to_string());
 
         let keys: Vec<StreamEntryId> = map.keys().cloned().collect();
         assert_eq!(keys, vec![id4, id3, id1, id2]);

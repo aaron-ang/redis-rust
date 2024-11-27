@@ -296,12 +296,12 @@ impl Server {
         }
 
         let mid = stream_args.len() / 2;
-        let keys = &stream_args[..mid];
-        let ids = &stream_args[mid..];
+        let stream_keys = &stream_args[..mid];
+        let start_ids = &stream_args[mid..];
 
-        let streams: Vec<(&str, &str)> = keys
+        let streams: Vec<(&str, &str)> = stream_keys
             .iter()
-            .zip(ids)
+            .zip(start_ids)
             .map(|(key, id)| Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?)))
             .collect::<Result<_>>()?;
 
@@ -314,11 +314,18 @@ impl Server {
         if entries.is_empty() {
             Ok(Value::Null)
         } else {
-            let values: Vec<Value> = entries
-                .into_iter()
-                .map(|(key, stream)| {
-                    let inner = build_stream_entry_list(stream);
-                    Value::Array(vec![Value::Bulk(key), Value::Array(inner)])
+            // Follow same stream order as input
+            let values = stream_keys
+                .iter()
+                .filter_map(|key| {
+                    unpack_bulk_string(key).ok().and_then(|key_str| {
+                        entries.get(key_str).map(|stream| {
+                            Value::Array(vec![
+                                Value::Bulk(key_str.to_string()),
+                                Value::Array(build_stream_entry_list(stream.clone())),
+                            ])
+                        })
+                    })
                 })
                 .collect();
             Ok(Value::Array(values))

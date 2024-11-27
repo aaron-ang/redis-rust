@@ -3,6 +3,7 @@ use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::{
     collections::HashMap,
     io::Read,
+    str::FromStr,
     time::{Duration, UNIX_EPOCH},
 };
 use strum::{Display, EnumString};
@@ -37,15 +38,21 @@ impl Command {
 }
 
 #[derive(Error, Debug)]
-pub enum InputError {
+pub enum RedisError {
     #[error("ERR wrong number of arguments for command")]
     InvalidArgument,
     #[error("value is not an integer or out of range")]
     InvalidInteger,
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
+    #[error("ERR no such key")]
+    KeyNotFound,
     #[error("Invalid entry ID format")]
     InvalidEntryId,
+    #[error("ERR The ID specified in XADD must be greater than 0-0")]
+    XAddIdTooSmall,
+    #[error("ERR The ID specified in XADD is equal or smaller than the target stream top item")]
+    XAddIdInvalidSequence,
 }
 
 #[derive(Clone, PartialEq, Display)]
@@ -303,5 +310,26 @@ fn read_numeric_length<T: Read>(buf: &mut T) -> Result<usize> {
     match read_length(buf)? {
         LengthValue::Length(length) => Ok(length),
         _ => anyhow::bail!("Expected a numeric length, received special length"),
+    }
+}
+
+#[derive(PartialEq)]
+pub enum XReadBlockType {
+    NoWait,
+    Wait(Duration),
+    WaitIndefinitely,
+}
+
+impl FromStr for XReadBlockType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "0" => Ok(XReadBlockType::WaitIndefinitely),
+            s => {
+                let ms = s.parse::<u64>()?;
+                Ok(XReadBlockType::Wait(Duration::from_millis(ms)))
+            }
+        }
     }
 }

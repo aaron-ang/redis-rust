@@ -1,8 +1,3 @@
-use crate::config::Config;
-use crate::db::{RecordType, Store};
-use crate::stream::StreamEntryId;
-use crate::util::{Command, InputError, ReplicaType};
-
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
@@ -13,6 +8,11 @@ use tokio::{
     sync::broadcast::error::RecvError,
     time::{sleep, timeout, Duration, Instant},
 };
+
+use crate::config::Config;
+use crate::db::{RecordType, Store};
+use crate::stream::StreamValue;
+use crate::util::{Command, RedisError, ReplicaType, XReadBlockType};
 
 pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 pub const REPL_OFFSET: usize = 0;
@@ -150,7 +150,7 @@ impl Server {
     // WAIT numreplicas timeout
     async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
         let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
         let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
@@ -189,7 +189,7 @@ impl Server {
     // CONFIG GET parameter
     fn handle_config(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
         let cmd = unpack_bulk_string(&args[0])?;
@@ -219,7 +219,7 @@ impl Server {
     // KEYS pattern
     async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
         let pattern = unpack_bulk_string(&args[0])?;
@@ -230,7 +230,7 @@ impl Server {
     // TYPE key
     async fn handle_type(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -246,7 +246,7 @@ impl Server {
     // XRANGE key start end
     async fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -270,57 +270,57 @@ impl Server {
     // XREAD [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
     async fn handle_xread(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
-        let mut block_ms = 0;
         let mut args_iter = args.iter();
+        let mut block_option = XReadBlockType::NoWait;
 
         loop {
             match args_iter.next() {
                 Some(Value::Bulk(b)) if b.to_lowercase() == "block" => {
                     if let Some(Value::Bulk(ms)) = args_iter.next() {
-                        block_ms = ms.parse()?;
+                        block_option = ms.parse()?;
                     } else {
-                        bail!(InputError::InvalidArgument);
+                        bail!(RedisError::InvalidArgument);
                     }
                 }
                 Some(Value::Bulk(b)) if b.to_lowercase() == "streams" => break,
-                _ => bail!(InputError::InvalidArgument),
+                _ => bail!(RedisError::InvalidArgument),
             }
         }
 
-        let stream_args = args_iter.collect::<Vec<_>>();
+        let stream_args: Vec<&Value> = args_iter.collect();
         if stream_args.len() % 2 != 0 {
-            bail!(InputError::InvalidArgument);
+            bail!(RedisError::InvalidArgument);
         }
 
         let mid = stream_args.len() / 2;
         let keys = &stream_args[..mid];
         let ids = &stream_args[mid..];
 
-        let streams = keys
+        let streams: Vec<(&str, &str)> = keys
             .iter()
             .zip(ids)
             .map(|(key, id)| Ok((unpack_bulk_string(key)?, unpack_bulk_string(id)?)))
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<_>>()?;
 
         let entries = self
             .config
             .store
-            .get_bulk_stream_entries(&streams, block_ms)
+            .get_bulk_stream_entries(&streams, block_option)
             .await?;
 
         if entries.is_empty() {
             Ok(Value::Null)
         } else {
-            let values = entries
+            let values: Vec<Value> = entries
                 .into_iter()
                 .map(|(key, stream)| {
                     let inner = build_stream_entry_list(stream);
                     Value::Array(vec![Value::Bulk(key), Value::Array(inner)])
                 })
-                .collect::<Vec<_>>();
+                .collect();
             Ok(Value::Array(values))
         }
     }
@@ -330,7 +330,7 @@ impl Server {
     }
 }
 
-fn build_stream_entry_list(entries: Vec<(StreamEntryId, HashMap<String, String>)>) -> Vec<Value> {
+fn build_stream_entry_list(entries: StreamValue) -> Vec<Value> {
     entries
         .iter()
         .map(|(id, fields)| {
@@ -374,7 +374,7 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
 // ECHO message
 fn handle_echo(args: &[Value]) -> Result<Value> {
     if args.is_empty() {
-        bail!(InputError::InvalidArgument);
+        bail!(RedisError::InvalidArgument);
     } else {
         Ok(args[0].clone())
     }
@@ -383,7 +383,7 @@ fn handle_echo(args: &[Value]) -> Result<Value> {
 // SET key value [PX milliseconds]
 pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(InputError::InvalidArgument);
+        bail!(RedisError::InvalidArgument);
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -396,9 +396,9 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
                 let ms = match args.get(3) {
                     Some(Value::Bulk(arg)) => match arg.parse::<u64>() {
                         Ok(ms) => ms,
-                        Err(_) => bail!(InputError::InvalidInteger),
+                        Err(_) => bail!(RedisError::InvalidInteger),
                     },
-                    _ => bail!(InputError::InvalidArgument),
+                    _ => bail!(RedisError::InvalidArgument),
                 };
                 expiry = Some(SystemTime::now() + Duration::from_millis(ms));
             }
@@ -413,7 +413,7 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
 // GET key
 pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
-        bail!(InputError::InvalidArgument);
+        bail!(RedisError::InvalidArgument);
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -427,7 +427,7 @@ pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
 // XADD key <* | id> field value [field value ...]
 pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(InputError::InvalidArgument);
+        bail!(RedisError::InvalidArgument);
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -440,12 +440,12 @@ pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
                 unpack_bulk_string(field)?.to_string(),
                 unpack_bulk_string(value)?.to_string(),
             )),
-            _ => bail!(InputError::InvalidArgument),
+            _ => bail!(RedisError::InvalidArgument),
         })
         .collect::<Result<HashMap<_, _>>>()?;
 
     if values.is_empty() {
-        bail!(InputError::InvalidArgument);
+        bail!(RedisError::InvalidArgument);
     }
 
     match store.add_stream_entry(key, entry_id, values).await {

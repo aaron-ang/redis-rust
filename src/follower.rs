@@ -1,7 +1,3 @@
-use crate::db::Store;
-use crate::server::{self, EMPTY_RDB_B64};
-use crate::util::Command;
-
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
@@ -11,6 +7,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+use crate::db::Store;
+use crate::server::{self, EMPTY_RDB_B64};
+use crate::util::Command;
 
 const BUFFER_SIZE: usize = 1024;
 const PSYNC_RESPONSE_LEN: usize = 56;

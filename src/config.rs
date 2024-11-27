@@ -1,6 +1,6 @@
 use resp::Value;
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::broadcast::{self, Sender};
+use tokio::sync::broadcast;
 
 use crate::util::{ReplicaType, ReplicationState};
 use crate::Store;
@@ -16,7 +16,7 @@ pub struct Config {
     pub dbfilename: String,
     pub role: ReplicaType,
     pub store: Arc<Store>,
-    pub tx: Arc<Sender<Value>>,
+    pub tx: Arc<broadcast::Sender<Value>>,
     pub rep_state: Arc<ReplicationState>,
 }
 

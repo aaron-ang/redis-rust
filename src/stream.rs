@@ -5,33 +5,52 @@ use std::{
     str::FromStr,
     time::SystemTime,
 };
+use tokio::sync::mpsc;
 
-use crate::util::InputError;
+use crate::util::RedisError;
 
 #[derive(Clone)]
 pub struct StreamRecord {
     id: String,
+    value: StreamValue,
     last_entry_id: StreamEntryId,
-    value: BTreeMap<StreamEntryId, HashMap<String, String>>,
+    listeners: HashMap<StreamEntryId, Vec<mpsc::Sender<(String, StreamValue)>>>,
 }
 
 impl StreamRecord {
     pub fn new(id: String) -> Self {
         Self {
             id,
+            value: StreamValue(BTreeMap::new()),
             last_entry_id: StreamEntryId::default(),
-            value: BTreeMap::new(),
+            listeners: HashMap::new(),
         }
     }
 
-    pub fn xadd(
+    pub async fn xadd(
         &mut self,
-        entry_id: &str,
+        entry_id_str: &str,
         values: HashMap<String, String>,
     ) -> Result<StreamEntryId> {
-        let entry_id = self.generate_entry_id(entry_id)?;
+        let entry_id = self.generate_entry_id(entry_id_str)?;
         self.validate_entry_id(&entry_id)?;
-        self.value.insert(entry_id.clone(), values);
+        self.value.0.insert(entry_id.clone(), values.clone());
+
+        self.listeners.retain(|expected_id, senders| {
+            if entry_id >= *expected_id {
+                let message = (
+                    self.id.clone(),
+                    StreamValue([(entry_id.clone(), values.clone())].into()),
+                );
+                senders.iter().for_each(|tx| {
+                    let _ = tx.try_send(message.clone());
+                });
+                false
+            } else {
+                true
+            }
+        });
+
         Ok(entry_id)
     }
 
@@ -40,12 +59,15 @@ impl StreamRecord {
         start: &StreamEntryId,
         end: &StreamEntryId,
         start_exclusive: bool,
-    ) -> Vec<(StreamEntryId, HashMap<String, String>)> {
-        self.value
+    ) -> StreamValue {
+        let result: BTreeMap<StreamEntryId, HashMap<String, String>> = self
+            .value
+            .0
             .range(start..=end)
-            .filter(|(id, _)| !start_exclusive || *id > start)
-            .map(|(id, values)| (id.clone(), values.clone()))
-            .collect()
+            .filter(|&(id, _)| !start_exclusive || id > start)
+            .map(|(id, value)| (id.clone(), value.clone()))
+            .collect();
+        StreamValue(result)
     }
 
     fn generate_entry_id(&self, entry_id: &str) -> Result<StreamEntryId> {
@@ -63,12 +85,12 @@ impl StreamRecord {
 
         let (ts_str, seq_no_str) = entry_id
             .split_once('-')
-            .ok_or_else(|| anyhow::anyhow!(InputError::InvalidEntryId))?;
+            .ok_or_else(|| anyhow::anyhow!(RedisError::InvalidEntryId))?;
 
         if seq_no_str == "*" {
             let ts_ms = ts_str.parse::<u128>()?;
             if ts_ms < self.last_entry_id.ts_ms {
-                anyhow::bail!("ERR The ID specified in XADD must be greater than the last one");
+                anyhow::bail!(RedisError::XAddIdInvalidSequence);
             } else if ts_ms == self.last_entry_id.ts_ms {
                 Ok(StreamEntryId::new(ts_ms, self.last_entry_id.seq_no + 1))
             } else {
@@ -82,14 +104,31 @@ impl StreamRecord {
     fn validate_entry_id(&mut self, entry_id: &StreamEntryId) -> Result<()> {
         if entry_id <= &self.last_entry_id {
             let err_msg = if entry_id == &StreamEntryId::default() {
-                "ERR The ID specified in XADD must be greater than 0-0"
+                RedisError::XAddIdTooSmall
             } else {
-                "ERR The ID specified in XADD is equal or smaller than the target stream top item"
+                RedisError::XAddIdInvalidSequence
             };
             anyhow::bail!(err_msg);
         }
         self.last_entry_id = entry_id.clone();
         Ok(())
+    }
+
+    pub fn subscribe(&mut self, id: StreamEntryId, tx: mpsc::Sender<(String, StreamValue)>) {
+        self.listeners.entry(id).or_insert_with(Vec::new).push(tx);
+    }
+}
+
+#[derive(Clone)]
+pub struct StreamValue(BTreeMap<StreamEntryId, HashMap<String, String>>);
+
+impl StreamValue {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&StreamEntryId, &HashMap<String, String>)> {
+        self.0.iter()
     }
 }
 
@@ -155,7 +194,7 @@ impl FromStr for StreamEntryId {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (ts_str, seq_no_str) = s
             .split_once('-')
-            .ok_or_else(|| anyhow::anyhow!(InputError::InvalidEntryId))?;
+            .ok_or_else(|| anyhow::anyhow!(RedisError::InvalidEntryId))?;
 
         let ts = ts_str.parse()?;
         let seq_no = seq_no_str.parse()?;
@@ -205,7 +244,7 @@ mod tests {
         map.insert(id2.clone(), "id2".to_string());
         map.insert(id4.clone(), "id4".to_string());
 
-        let keys: Vec<_> = map.keys().cloned().collect();
+        let keys: Vec<StreamEntryId> = map.keys().cloned().collect();
         assert_eq!(keys, vec![id4, id3, id1, id2]);
     }
 }

@@ -2,12 +2,13 @@ use anyhow::{bail, Result};
 use glob::Pattern;
 use std::{collections::HashMap, fs, path::PathBuf, sync::Arc, time::SystemTime};
 use tokio::{
-    sync::RwLock,
-    time::{sleep, Duration},
+    sync::{mpsc, RwLock},
+    time,
 };
 
-use crate::stream::{StreamEntryId, StreamRecord};
-use crate::util::{InputError, Instance, StringRecord};
+use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
+use crate::util::XReadBlockType;
+use crate::util::{Instance, RedisError, StringRecord};
 
 #[derive(Clone)]
 pub enum RecordType {
@@ -129,9 +130,9 @@ impl Store {
         }
 
         if let RecordType::Stream(stream) = &mut stream_data.record {
-            stream.xadd(entry_id, values)
+            stream.xadd(entry_id, values).await
         } else {
-            bail!(InputError::WrongType);
+            bail!(RedisError::WrongType);
         }
     }
 
@@ -140,43 +141,67 @@ impl Store {
         key: &str,
         start: &str,
         end: &str,
-    ) -> Result<Vec<(StreamEntryId, HashMap<String, String>)>> {
+    ) -> Result<StreamValue> {
+        let start = StreamEntryId::parse_start_range(start)?;
+        let end = StreamEntryId::parse_end_range(end)?;
+
         let storage = self.entries.read().await;
         let stream_data = storage
             .get(key)
-            .ok_or_else(|| anyhow::anyhow!("ERR no such key"))?;
-
-        let start = StreamEntryId::parse_start_range(start)?;
-        let end = StreamEntryId::parse_end_range(end)?;
+            .ok_or_else(|| anyhow::anyhow!(RedisError::KeyNotFound))?;
 
         if let RecordType::Stream(stream) = &stream_data.record {
             Ok(stream.xrange(&start, &end, false))
         } else {
-            bail!(InputError::WrongType);
+            bail!(RedisError::WrongType);
         }
     }
 
     pub async fn get_bulk_stream_entries(
         &self,
         streams: &[(&str, &str)],
-        block_ms: usize,
-    ) -> Result<Vec<(String, Vec<(StreamEntryId, HashMap<String, String>)>)>> {
-        sleep(Duration::from_millis(block_ms as u64)).await;
-        let mut res = vec![];
-        let storage = self.entries.read().await;
-        for (key, start) in streams {
-            let Some(stream) = storage.get(*key) else {
+        block_option: XReadBlockType,
+    ) -> Result<HashMap<String, StreamValue>> {
+        let mut res = HashMap::new();
+        let (tx, mut rx) = mpsc::channel(streams.len());
+
+        let mut storage = self.entries.write().await;
+
+        for &(stream_key, start_id) in streams {
+            let Some(stream) = storage.get_mut(stream_key) else {
                 continue;
             };
-            let RecordType::Stream(ref stream) = &stream.record else {
-                bail!(InputError::WrongType);
+            let RecordType::Stream(ref mut stream) = &mut stream.record else {
+                bail!(RedisError::WrongType);
             };
-            let start = StreamEntryId::parse_start_range(*start)?;
+            let start = StreamEntryId::parse_start_range(start_id)?;
             let range_entries = stream.xrange(&start, &StreamEntryId::MAX, true);
-            if !range_entries.is_empty() {
-                res.push((key.to_string(), range_entries));
+            if range_entries.is_empty() {
+                stream.subscribe(start, tx.clone());
+            } else {
+                res.insert(stream_key.to_string(), range_entries);
             }
         }
-        Ok(res)
+
+        if block_option == XReadBlockType::NoWait || !res.is_empty() {
+            return Ok(res);
+        }
+
+        drop(storage);
+
+        let await_stream_entry = async move {
+            if let Some((stream_key, entry)) = rx.recv().await {
+                res.insert(stream_key, entry);
+            }
+            res
+        };
+
+        match block_option {
+            XReadBlockType::Wait(duration) => Ok(time::timeout(duration, await_stream_entry)
+                .await
+                .unwrap_or_default()),
+            XReadBlockType::WaitIndefinitely => Ok(await_stream_entry.await),
+            _ => unreachable!(),
+        }
     }
 }

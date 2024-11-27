@@ -151,7 +151,7 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!(RedisError::KeyNotFound))?;
 
         if let RecordType::Stream(stream) = &stream_data.record {
-            Ok(stream.xrange(&start, &end, false))
+            Ok(stream.xrange(start, end, false))
         } else {
             bail!(RedisError::WrongType);
         }
@@ -165,21 +165,27 @@ impl Store {
         let mut res = HashMap::new();
         let (tx, mut rx) = mpsc::channel(streams.len());
 
-        let mut storage = self.entries.write().await;
-
-        for &(stream_key, start_id) in streams {
-            let Some(stream) = storage.get_mut(stream_key) else {
-                continue;
-            };
-            let RecordType::Stream(ref mut stream) = &mut stream.record else {
-                bail!(RedisError::WrongType);
-            };
-            let start = StreamEntryId::parse_start_range(start_id)?;
-            let range_entries = stream.xrange(&start, &StreamEntryId::MAX, true);
-            if range_entries.is_empty() {
-                stream.subscribe(start, tx.clone());
-            } else {
-                res.insert(stream_key.to_string(), range_entries);
+        {
+            let mut storage = self.entries.write().await;
+            for &(stream_key, start_id) in streams {
+                let Some(stream_data) = storage.get_mut(stream_key) else {
+                    continue;
+                };
+                let RecordType::Stream(stream) = &mut stream_data.record else {
+                    bail!(RedisError::WrongType);
+                };
+                match start_id {
+                    "$" => stream.subscribe(stream.last_entry_id(), tx.clone()),
+                    _ => {
+                        let start = StreamEntryId::parse_start_range(start_id)?;
+                        let range_entries = stream.xrange(start, StreamEntryId::MAX, true);
+                        if range_entries.is_empty() {
+                            stream.subscribe(start, tx.clone());
+                        } else {
+                            res.insert(stream_key.to_owned(), range_entries);
+                        }
+                    }
+                }
             }
         }
 
@@ -187,9 +193,7 @@ impl Store {
             return Ok(res);
         }
 
-        drop(storage);
-
-        let await_stream_entry = async move {
+        let await_stream_entry = async {
             if let Some((stream_key, entry)) = rx.recv().await {
                 res.insert(stream_key, entry);
             }

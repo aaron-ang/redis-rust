@@ -29,11 +29,12 @@ pub enum Command {
     XADD,
     XRANGE,
     XREAD,
+    INCR,
 }
 
 impl Command {
     pub fn is_write(&self) -> bool {
-        matches!(self, Command::SET | Command::XADD)
+        matches!(self, Command::SET | Command::XADD | Command::INCR)
     }
 }
 
@@ -41,13 +42,13 @@ impl Command {
 pub enum RedisError {
     #[error("ERR wrong number of arguments for command")]
     InvalidArgument,
-    #[error("value is not an integer or out of range")]
+    #[error("ERR value is not an integer or out of range")]
     InvalidInteger,
     #[error("WRONGTYPE Operation against a key holding the wrong kind of value")]
     WrongType,
     #[error("ERR no such key")]
     KeyNotFound,
-    #[error("Invalid entry ID format")]
+    #[error("ERR invalid entry ID format")]
     InvalidEntryId,
     #[error("ERR The ID specified in XADD must be greater than 0-0")]
     XAddIdTooSmall,
@@ -239,7 +240,24 @@ enum LengthValue {
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum StringRecord {
     String(String),
-    Integer(u32),
+    Integer(i64),
+}
+
+impl StringRecord {
+    pub fn incr(&mut self) -> Result<i64> {
+        match self {
+            StringRecord::String(s) => {
+                let mut i = s.parse::<i64>().map_err(|_| RedisError::InvalidInteger)?;
+                i += 1;
+                *s = i.to_string();
+                Ok(i)
+            }
+            StringRecord::Integer(i) => {
+                *i += 1;
+                Ok(*i)
+            }
+        }
+    }
 }
 
 impl ToString for StringRecord {
@@ -264,13 +282,13 @@ fn read_string<T: Read>(buf: &mut T) -> Result<StringRecord> {
             buf.read_exact(&mut bytes)?;
             Ok(StringRecord::String(String::from_utf8(bytes)?))
         }
-        LengthValue::IntegerAsString8 => Ok(StringRecord::Integer(buf.read_u8()? as u32)),
-        LengthValue::IntegerAsString16 => {
-            Ok(StringRecord::Integer(buf.read_u16::<LittleEndian>()? as u32))
-        }
-        LengthValue::IntegerAsString32 => {
-            Ok(StringRecord::Integer(buf.read_u32::<LittleEndian>()?))
-        }
+        LengthValue::IntegerAsString8 => Ok(StringRecord::Integer(buf.read_u8()?.into())),
+        LengthValue::IntegerAsString16 => Ok(StringRecord::Integer(
+            buf.read_u16::<LittleEndian>()?.into(),
+        )),
+        LengthValue::IntegerAsString32 => Ok(StringRecord::Integer(
+            buf.read_u32::<LittleEndian>()?.into(),
+        )),
         LengthValue::CompressedString => {
             let clen = read_numeric_length(buf)?;
             let _ulen = read_numeric_length(buf)?;

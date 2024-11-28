@@ -31,6 +31,7 @@ pub enum Command {
     XREAD,
     INCR,
     MULTI,
+    EXEC,
 }
 
 impl Command {
@@ -55,6 +56,8 @@ pub enum RedisError {
     XAddIdTooSmall,
     #[error("ERR The ID specified in XADD is equal or smaller than the target stream top item")]
     XAddIdInvalidSequence,
+    #[error("ERR EXEC without MULTI")]
+    ExecWithoutMulti,
 }
 
 #[derive(Clone, PartialEq, Display)]

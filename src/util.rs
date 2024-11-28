@@ -12,7 +12,7 @@ use tokio::sync::RwLock;
 
 use crate::db::{RecordType, RedisData, Store};
 
-#[derive(Clone, Copy, PartialEq, Display, EnumString)]
+#[derive(Debug, Clone, Copy, PartialEq, Display, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Command {
     PING,
@@ -32,6 +32,7 @@ pub enum Command {
     INCR,
     MULTI,
     EXEC,
+    DISCARD,
 }
 
 impl Command {
@@ -56,8 +57,8 @@ pub enum RedisError {
     XAddIdTooSmall,
     #[error("ERR The ID specified in XADD is equal or smaller than the target stream top item")]
     XAddIdInvalidSequence,
-    #[error("ERR EXEC without MULTI")]
-    ExecWithoutMulti,
+    #[error("ERR {} without MULTI", .0)]
+    CommandWithoutMulti(Command),
 }
 
 #[derive(Clone, PartialEq, Display)]

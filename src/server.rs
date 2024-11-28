@@ -22,6 +22,7 @@ pub struct Server {
     config: Config,
     replication: bool,
     stream: TcpStream,
+    queued_commands: Option<Vec<(Command, Vec<Value>)>>,
 }
 
 impl Server {
@@ -30,6 +31,7 @@ impl Server {
             config,
             replication: false,
             stream,
+            queued_commands: None,
         }
     }
 
@@ -89,6 +91,12 @@ impl Server {
 
     pub async fn process(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
         let (command, args) = extract_command(cmd_line)?;
+
+        if let Some(queued_commands) = &mut self.queued_commands {
+            queued_commands.push((command, args.to_vec()));
+            return Ok(Some(Value::String("QUEUED".into())));
+        }
+
         let response = match command {
             Command::PING => Some(Value::String("PONG".into())),
             Command::ECHO => Some(handle_echo(args)?),
@@ -110,6 +118,10 @@ impl Server {
             Command::XRANGE => Some(self.handle_xrange(args).await?),
             Command::XREAD => Some(self.handle_xread(args).await?),
             Command::INCR => Some(handle_incr(args, &self.config.store).await?),
+            Command::MULTI => {
+                self.queued_commands = Some(Vec::new());
+                Some(Value::String("OK".into()))
+            }
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -361,11 +373,10 @@ fn build_stream_entry_list(entries: StreamValue) -> Vec<Value> {
 }
 
 pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
-    if let Value::Array(a) = value {
-        let command_str = unpack_bulk_string(&a[0])?;
+    if let Value::Array(args) = value {
+        let command_str = unpack_bulk_string(&args[0])?;
         let command = Command::from_str(command_str)?;
-        let args = &a[1..];
-        Ok((command, args))
+        Ok((command, &args[1..]))
     } else {
         bail!("Expected array value")
     }

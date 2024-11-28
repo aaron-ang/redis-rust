@@ -30,6 +30,7 @@ pub enum Command {
     XRANGE,
     XREAD,
     INCR,
+    MULTI,
 }
 
 impl Command {

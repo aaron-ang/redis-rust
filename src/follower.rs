@@ -81,6 +81,9 @@ impl Follower {
             Command::XADD => {
                 server::handle_xadd(args, &self.store).await?;
             }
+            Command::INCR => {
+                server::handle_incr(args, &self.store).await?;
+            }
             _ => eprintln!("Unknown command: {}", command),
         }
         Ok(())

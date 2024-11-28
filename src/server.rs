@@ -38,8 +38,7 @@ impl Server {
     pub async fn handle_conn(&mut self) -> Result<()> {
         let mut buf = vec![0; 1024];
 
-        loop {
-            let bytes_read = self.stream.read(&mut buf).await?;
+        while let Ok(bytes_read) = self.stream.read(&mut buf).await {
             if bytes_read == 0 {
                 eprintln!("Client disconnected");
                 break;
@@ -47,11 +46,17 @@ impl Server {
 
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Some(cmd_line) = decoder.decode().ok() {
-                if let Some(response) = self.process(&cmd_line).await.unwrap_or_else(|e| {
-                    eprint!("Error processing command: {e}");
-                    Some(Value::Error(e.to_string()))
-                }) {
-                    self.stream.write_all(&response.encode()).await?;
+                match self.process(&cmd_line).await {
+                    Ok(Some(response)) => {
+                        self.stream.write_all(&response.encode()).await?;
+                    }
+                    Ok(None) => (),
+                    Err(e) => {
+                        eprintln!("Error processing command: {}", e);
+                        self.stream
+                            .write_all(&Value::Error(e.to_string()).encode())
+                            .await?;
+                    }
                 }
             }
 
@@ -96,25 +101,28 @@ impl Server {
             let response = match command {
                 Command::EXEC => {
                     let commands = self.queued_commands.take().unwrap();
-                    let mut responses = vec![];
+                    let mut responses = Vec::with_capacity(commands.len());
                     for cmd in commands {
-                        if let Some(result) =
-                            Box::pin(self.process(&cmd)).await.unwrap_or_else(|e| {
-                                eprint!("Error processing command: {e}");
-                                Some(Value::Error(e.to_string()))
-                            })
-                        {
-                            responses.push(result);
+                        match Box::pin(self.process(&cmd)).await {
+                            Ok(Some(result)) => responses.push(result),
+                            Ok(None) => (),
+                            Err(e) => {
+                                eprintln!("Error processing command: {}", e);
+                                responses.push(Value::Error(e.to_string()));
+                            }
                         }
                     }
                     Some(Value::Array(responses))
+                }
+                Command::DISCARD => {
+                    self.queued_commands = None;
+                    Some(Value::String("OK".into()))
                 }
                 _ => {
                     queued_commands.push(cmd_line.clone());
                     Some(Value::String("QUEUED".into()))
                 }
             };
-
             return Ok(response);
         }
 
@@ -143,7 +151,8 @@ impl Server {
                 self.queued_commands = Some(Vec::new());
                 Some(Value::String("OK".into()))
             }
-            Command::EXEC => bail!(RedisError::ExecWithoutMulti),
+            Command::EXEC => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::DISCARD => bail!(RedisError::CommandWithoutMulti(command)),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -460,7 +469,7 @@ pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     let key = unpack_bulk_string(&args[0])?;
     match store.get(key).await {
         Some(RecordType::String(s)) => Ok(Value::Bulk(s.to_string())),
-        Some(RecordType::Stream(_)) => todo!(),
+        Some(RecordType::Stream(_)) => unimplemented!(),
         None => Ok(Value::Null),
     }
 }

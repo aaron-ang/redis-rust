@@ -95,7 +95,7 @@ impl Server {
         if let Some(queued_commands) = &mut self.queued_commands {
             let response = match command {
                 Command::EXEC => {
-                    let commands = std::mem::take(queued_commands);
+                    let commands = self.queued_commands.take().unwrap();
                     let mut responses = vec![];
                     for cmd in commands {
                         if let Some(result) =

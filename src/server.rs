@@ -109,6 +109,7 @@ impl Server {
             Command::XADD => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRANGE => Some(self.handle_xrange(args).await?),
             Command::XREAD => Some(self.handle_xread(args).await?),
+            Command::INCR => Some(handle_incr(args, &self.config.store).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -459,4 +460,15 @@ pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
         Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
         Err(e) => Ok(Value::Error(e.to_string())),
     }
+}
+
+// INC key
+pub async fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
+    if args.is_empty() {
+        bail!(RedisError::InvalidArgument);
+    }
+
+    let key = unpack_bulk_string(&args[0])?;
+    let value = store.incr(key).await?;
+    Ok(Value::Integer(value))
 }

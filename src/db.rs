@@ -90,6 +90,19 @@ impl Store {
             .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
 
+    pub async fn incr(&self, key: &str) -> Result<i64> {
+        let mut storage = self.entries.write().await;
+        let data = storage
+            .entry(key.to_string())
+            .or_insert_with(|| RedisData::new(RecordType::String(StringRecord::Integer(0)), None));
+
+        if let RecordType::String(string_rec) = &mut data.record {
+            string_rec.incr()
+        } else {
+            bail!(RedisError::WrongType)
+        }
+    }
+
     pub async fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();

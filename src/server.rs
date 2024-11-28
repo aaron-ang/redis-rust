@@ -22,7 +22,7 @@ pub struct Server {
     config: Config,
     replication: bool,
     stream: TcpStream,
-    queued_commands: Option<Vec<(Command, Vec<Value>)>>,
+    queued_commands: Option<Vec<Value>>,
 }
 
 impl Server {
@@ -93,8 +93,29 @@ impl Server {
         let (command, args) = extract_command(cmd_line)?;
 
         if let Some(queued_commands) = &mut self.queued_commands {
-            queued_commands.push((command, args.to_vec()));
-            return Ok(Some(Value::String("QUEUED".into())));
+            let response = match command {
+                Command::EXEC => {
+                    let commands = std::mem::take(queued_commands);
+                    let mut responses = vec![];
+                    for cmd in commands {
+                        if let Some(result) =
+                            Box::pin(self.process(&cmd)).await.unwrap_or_else(|e| {
+                                eprint!("Error processing command: {e}");
+                                Some(Value::Error(e.to_string()))
+                            })
+                        {
+                            responses.push(result);
+                        }
+                    }
+                    Some(Value::Array(responses))
+                }
+                _ => {
+                    queued_commands.push(cmd_line.clone());
+                    Some(Value::String("QUEUED".into()))
+                }
+            };
+
+            return Ok(response);
         }
 
         let response = match command {
@@ -122,6 +143,7 @@ impl Server {
                 self.queued_commands = Some(Vec::new());
                 Some(Value::String("OK".into()))
             }
+            Command::EXEC => bail!(RedisError::ExecWithoutMulti),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {

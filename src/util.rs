@@ -25,6 +25,7 @@ pub enum Command {
     Info,
     Keys,
     LLen,
+    LPop,
     LPush,
     LRange,
     Multi,
@@ -44,7 +45,12 @@ impl Command {
     pub fn is_write(&self) -> bool {
         matches!(
             self,
-            Command::Incr | Command::Set | Command::XAdd | Command::LPush | Command::RPush
+            Command::Incr
+                | Command::Set
+                | Command::XAdd
+                | Command::LPop
+                | Command::LPush
+                | Command::RPush
         )
     }
 }

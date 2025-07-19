@@ -126,6 +126,18 @@ impl Store {
         }
     }
 
+    pub async fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
+        let mut storage = self.entries.write().await;
+        let Some(data) = storage.get_mut(key) else {
+            return Ok(Vec::new());
+        };
+        if let RecordType::List(list) = &mut data.record {
+            Ok((0..count).filter_map(|_| list.pop_front()).collect())
+        } else {
+            bail!(RedisError::WrongType)
+        }
+    }
+
     pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
         let mut storage = self.entries.write().await;
         let data = storage

@@ -135,26 +135,27 @@ impl Server {
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
             Command::Info => Some(self.handle_info()),
             Command::Keys => Some(self.handle_keys(args).await?),
-            Command::Lrange => Some(self.handle_lrange(args).await?),
+            Command::LPush => Some(handle_lpush(args, &self.config.store).await?),
+            Command::LRange => Some(self.handle_lrange(args).await?),
             Command::Multi => {
                 self.queued_commands = Some(Vec::new());
                 Some(Value::String("OK".into()))
             }
             Command::Ping => Some(Value::String("PONG".into())),
-            Command::Psync => {
+            Command::PSync => {
                 if let Err(e) = self.handle_psync().await {
                     eprintln!("Error handling PSYNC: {e:?}");
                 }
                 None
             }
-            Command::Replconf => Some(Value::String("OK".into())),
-            Command::Rpush => Some(handle_rpush(args, &self.config.store).await?),
+            Command::ReplConf => Some(Value::String("OK".into())),
+            Command::RPush => Some(handle_rpush(args, &self.config.store).await?),
             Command::Set => Some(handle_set(args, &self.config.store).await?),
             Command::Type => Some(self.handle_type(args).await?),
             Command::Wait => Some(self.handle_wait(args).await?),
-            Command::Xadd => Some(handle_xadd(args, &self.config.store).await?),
-            Command::Xrange => Some(self.handle_xrange(args).await?),
-            Command::Xread => Some(self.handle_xread(args).await?),
+            Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
+            Command::XRange => Some(self.handle_xrange(args).await?),
+            Command::XRead => Some(self.handle_xread(args).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -527,7 +528,7 @@ pub async fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
 
 // RPUSH key element [element ...]
 pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
-    if args.is_empty() {
+    if args.len() < 2 {
         bail!(RedisError::InvalidArgument);
     }
     let key = unpack_bulk_string(&args[0])?;
@@ -536,5 +537,19 @@ pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
         .map(|v| unpack_bulk_string(v))
         .collect::<Result<Vec<_>>>()?;
     let count = store.rpush(key, &elements).await?;
+    Ok(Value::Integer(count))
+}
+
+// LPUSH key element [element ...]
+pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 2 {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let elements = args[1..]
+        .iter()
+        .map(|v| unpack_bulk_string(v))
+        .collect::<Result<Vec<_>>>()?;
+    let count = store.lpush(key, &elements).await?;
     Ok(Value::Integer(count))
 }

@@ -77,14 +77,17 @@ impl Follower {
                 server::handle_incr(args, &self.store).await?;
             }
             Command::Ping => {}
-            Command::Replconf => self.handle_replconf().await?,
-            Command::Rpush => {
+            Command::LPush => {
+                server::handle_lpush(args, &self.store).await?;
+            }
+            Command::ReplConf => self.handle_replconf().await?,
+            Command::RPush => {
                 server::handle_rpush(args, &self.store).await?;
             }
             Command::Set => {
                 server::handle_set(args, &self.store).await?;
             }
-            Command::Xadd => {
+            Command::XAdd => {
                 server::handle_xadd(args, &self.store).await?;
             }
             _ => eprintln!("Unknown command: {command}"),
@@ -128,7 +131,7 @@ impl Follower {
     async fn send_replconf(&mut self) -> Result<()> {
         // Send port configuration
         let port_cmd = Value::Array(vec![
-            Value::Bulk(Command::Replconf.to_string()),
+            Value::Bulk(Command::ReplConf.to_string()),
             Value::Bulk("listening-port".into()),
             Value::Bulk(self.port.to_string()),
         ]);
@@ -136,7 +139,7 @@ impl Follower {
 
         // Send capabilities
         let capa_cmd = Value::Array(vec![
-            Value::Bulk(Command::Replconf.to_string()),
+            Value::Bulk(Command::ReplConf.to_string()),
             Value::Bulk("capa".into()),
             Value::Bulk("eof".into()),
         ]);
@@ -160,7 +163,7 @@ impl Follower {
 
     async fn request_sync(&mut self) -> Result<()> {
         let psync = Value::Array(vec![
-            Value::Bulk(Command::Psync.to_string()),
+            Value::Bulk(Command::PSync.to_string()),
             Value::Bulk("?".into()),
             Value::Bulk("-1".to_string()),
         ]);
@@ -195,7 +198,7 @@ impl Follower {
 
     async fn handle_replconf(&mut self) -> Result<()> {
         let replconf_ack = Value::Array(vec![
-            Value::Bulk(Command::Replconf.to_string()),
+            Value::Bulk(Command::ReplConf.to_string()),
             Value::Bulk("ACK".into()),
             Value::Bulk(self.offset.to_string()),
         ]);

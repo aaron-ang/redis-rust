@@ -14,34 +14,35 @@ use tokio::sync::RwLock;
 use crate::db::{RecordType, RedisData, Store};
 
 #[derive(Debug, Clone, Copy, PartialEq, Display, EnumString)]
-#[strum(ascii_case_insensitive)]
+#[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
-    CONFIG,
-    DISCARD,
-    ECHO,
-    EXEC,
-    GET,
-    INCR,
-    INFO,
-    KEYS,
-    MULTI,
-    PING,
-    PSYNC,
-    REPLCONF,
-    RPUSH,
-    SET,
-    TYPE,
-    WAIT,
-    XADD,
-    XRANGE,
-    XREAD,
+    Config,
+    Discard,
+    Echo,
+    Exec,
+    Get,
+    Incr,
+    Info,
+    Keys,
+    Lrange,
+    Multi,
+    Ping,
+    Psync,
+    Replconf,
+    Rpush,
+    Set,
+    Type,
+    Wait,
+    Xadd,
+    Xrange,
+    Xread,
 }
 
 impl Command {
     pub fn is_write(&self) -> bool {
         matches!(
             self,
-            Command::INCR | Command::SET | Command::XADD | Command::RPUSH
+            Command::Incr | Command::Set | Command::Xadd | Command::Rpush
         )
     }
 }
@@ -77,6 +78,12 @@ pub enum ReplicaType {
 pub struct ReplicationState {
     num_ack: RwLock<usize>,
     prev_client_cmd: RwLock<Option<Command>>,
+}
+
+impl Default for ReplicationState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ReplicationState {
@@ -116,20 +123,42 @@ pub struct Instance {
     _checksum: [u8; 8],
 }
 
+struct InstanceBuilder {
+    version: [u8; 4],
+    metadata: HashMap<StringRecord, StringRecord>,
+    databases: HashMap<usize, Store>,
+    checksum: [u8; 8],
+}
+
+impl InstanceBuilder {
+    fn new(version: [u8; 4]) -> Self {
+        Self {
+            version,
+            metadata: HashMap::new(),
+            databases: HashMap::new(),
+            checksum: [0; 8],
+        }
+    }
+
+    fn build(self) -> Instance {
+        Instance {
+            _version: self.version,
+            _metadata: self.metadata,
+            databases: self.databases,
+            _checksum: self.checksum,
+        }
+    }
+}
+
 const MAGIC: &str = "REDIS";
 
 impl Instance {
     pub fn new<T: Read>(mut buf: T) -> Result<Self> {
         Self::validate_magic(&mut buf)?;
         let version = Self::read_version(&mut buf)?;
-        let (metadata, databases, checksum) = Self::read_sections(&mut buf)?;
-
-        Ok(Instance {
-            _version: version,
-            _metadata: metadata,
-            databases,
-            _checksum: checksum,
-        })
+        let mut builder = InstanceBuilder::new(version);
+        Self::read_sections(&mut buf, &mut builder)?;
+        Ok(builder.build())
     }
 
     fn validate_magic<T: Read>(buf: &mut T) -> Result<()> {
@@ -149,31 +178,21 @@ impl Instance {
         Ok(version)
     }
 
-    fn read_sections<T: Read>(
-        buf: &mut T,
-    ) -> Result<(
-        HashMap<StringRecord, StringRecord>,
-        HashMap<usize, Store>,
-        [u8; 8],
-    )> {
-        let mut metadata = HashMap::new();
-        let mut databases = HashMap::new();
-
+    fn read_sections<T: Read>(buf: &mut T, builder: &mut InstanceBuilder) -> Result<()> {
         loop {
             match buf.read_u8()?.into() {
                 SectionId::Metadata => {
                     let name = read_string(buf)?;
                     let value = read_string(buf)?;
-                    metadata.insert(name, value);
+                    builder.metadata.insert(name, value);
                 }
                 SectionId::Database => {
                     let (index, store) = Self::read_database(buf)?;
-                    databases.insert(index, store);
+                    builder.databases.insert(index, store);
                 }
                 SectionId::EndOfFile => {
-                    let mut checksum = [0u8; 8];
-                    buf.read_exact(&mut checksum)?;
-                    return Ok((metadata, databases, checksum));
+                    buf.read_exact(&mut builder.checksum)?;
+                    return Ok(());
                 }
             }
         }
@@ -273,8 +292,8 @@ impl StringRecord {
 impl fmt::Display for StringRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StringRecord::String(s) => write!(f, "{}", s),
-            StringRecord::Integer(i) => write!(f, "{}", i),
+            StringRecord::String(s) => write!(f, "{s}"),
+            StringRecord::Integer(i) => write!(f, "{i}"),
         }
     }
 }

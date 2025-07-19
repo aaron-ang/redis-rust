@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
 
         tokio::spawn(async move {
             if let Err(e) = Server::new(config, stream).handle_conn().await {
-                eprintln!("Error handling connection: {:?}", e);
+                eprintln!("Error handling connection: {e:?}");
             }
         });
     }
@@ -98,7 +98,7 @@ async fn spawn_follower(
 
     tokio::spawn(async move {
         if let Err(e) = follower.handle_conn().await {
-            eprintln!("Error handling connection from leader: {:?}", e);
+            eprintln!("Error handling connection from leader: {e:?}");
         }
     });
 

@@ -61,7 +61,7 @@ impl Follower {
                 Err(e) => match e.kind() {
                     ErrorKind::UnexpectedEof => break,
                     ErrorKind::InvalidInput => continue,
-                    _ => eprintln!("Error: {:?}", e),
+                    _ => eprintln!("Error: {e:?}"),
                 },
             }
         }
@@ -70,24 +70,24 @@ impl Follower {
 
     async fn handle_command(&mut self, command: Command, args: &[Value]) -> Result<()> {
         match command {
-            Command::GET => {
+            Command::Get => {
                 server::handle_get(args, &self.store).await?;
             }
-            Command::INCR => {
+            Command::Incr => {
                 server::handle_incr(args, &self.store).await?;
             }
-            Command::PING => {}
-            Command::REPLCONF => self.handle_replconf().await?,
-            Command::RPUSH => {
+            Command::Ping => {}
+            Command::Replconf => self.handle_replconf().await?,
+            Command::Rpush => {
                 server::handle_rpush(args, &self.store).await?;
             }
-            Command::SET => {
+            Command::Set => {
                 server::handle_set(args, &self.store).await?;
             }
-            Command::XADD => {
+            Command::Xadd => {
                 server::handle_xadd(args, &self.store).await?;
             }
-            _ => eprintln!("Unknown command: {}", command),
+            _ => eprintln!("Unknown command: {command}"),
         }
         Ok(())
     }
@@ -116,7 +116,7 @@ impl Follower {
     }
 
     async fn send_ping(&mut self) -> Result<()> {
-        let ping = Value::Array(vec![Value::Bulk(Command::PING.to_string())]);
+        let ping = Value::Array(vec![Value::Bulk(Command::Ping.to_string())]);
         self.send_command(ping).await?;
 
         match self.read_response().await? {
@@ -128,7 +128,7 @@ impl Follower {
     async fn send_replconf(&mut self) -> Result<()> {
         // Send port configuration
         let port_cmd = Value::Array(vec![
-            Value::Bulk(Command::REPLCONF.to_string()),
+            Value::Bulk(Command::Replconf.to_string()),
             Value::Bulk("listening-port".into()),
             Value::Bulk(self.port.to_string()),
         ]);
@@ -136,7 +136,7 @@ impl Follower {
 
         // Send capabilities
         let capa_cmd = Value::Array(vec![
-            Value::Bulk(Command::REPLCONF.to_string()),
+            Value::Bulk(Command::Replconf.to_string()),
             Value::Bulk("capa".into()),
             Value::Bulk("eof".into()),
         ]);
@@ -160,7 +160,7 @@ impl Follower {
 
     async fn request_sync(&mut self) -> Result<()> {
         let psync = Value::Array(vec![
-            Value::Bulk(Command::PSYNC.to_string()),
+            Value::Bulk(Command::Psync.to_string()),
             Value::Bulk("?".into()),
             Value::Bulk("-1".to_string()),
         ]);
@@ -195,7 +195,7 @@ impl Follower {
 
     async fn handle_replconf(&mut self) -> Result<()> {
         let replconf_ack = Value::Array(vec![
-            Value::Bulk(Command::REPLCONF.to_string()),
+            Value::Bulk(Command::Replconf.to_string()),
             Value::Bulk("ACK".into()),
             Value::Bulk(self.offset.to_string()),
         ]);

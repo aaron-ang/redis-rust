@@ -70,19 +70,22 @@ impl Follower {
 
     async fn handle_command(&mut self, command: Command, args: &[Value]) -> Result<()> {
         match command {
-            Command::PING => {}
-            Command::SET => {
-                server::handle_set(args, &self.store).await?;
-            }
             Command::GET => {
                 server::handle_get(args, &self.store).await?;
             }
-            Command::REPLCONF => self.handle_replconf().await?,
-            Command::XADD => {
-                server::handle_xadd(args, &self.store).await?;
-            }
             Command::INCR => {
                 server::handle_incr(args, &self.store).await?;
+            }
+            Command::PING => {}
+            Command::REPLCONF => self.handle_replconf().await?,
+            Command::RPUSH => {
+                server::handle_rpush(args, &self.store).await?;
+            }
+            Command::SET => {
+                server::handle_set(args, &self.store).await?;
+            }
+            Command::XADD => {
+                server::handle_xadd(args, &self.store).await?;
             }
             _ => eprintln!("Unknown command: {}", command),
         }

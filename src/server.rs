@@ -127,32 +127,33 @@ impl Server {
         }
 
         let response = match command {
-            Command::PING => Some(Value::String("PONG".into())),
+            Command::CONFIG => Some(self.handle_config(args)?),
+            Command::DISCARD => bail!(RedisError::CommandWithoutMulti(command)),
             Command::ECHO => Some(handle_echo(args)?),
-            Command::SET => Some(handle_set(args, &self.config.store).await?),
+            Command::EXEC => bail!(RedisError::CommandWithoutMulti(command)),
             Command::GET => Some(handle_get(args, &self.config.store).await?),
+            Command::INCR => Some(handle_incr(args, &self.config.store).await?),
             Command::INFO => Some(self.handle_info()),
-            Command::REPLCONF => Some(Value::String("OK".into())),
+            Command::KEYS => Some(self.handle_keys(args).await?),
+            Command::MULTI => {
+                self.queued_commands = Some(Vec::new());
+                Some(Value::String("OK".into()))
+            }
+            Command::PING => Some(Value::String("PONG".into())),
             Command::PSYNC => {
                 if let Err(e) = self.handle_psync().await {
                     eprintln!("Error handling PSYNC: {:?}", e);
                 }
                 None
             }
-            Command::WAIT => Some(self.handle_wait(args).await?),
-            Command::CONFIG => Some(self.handle_config(args)?),
-            Command::KEYS => Some(self.handle_keys(args).await?),
+            Command::REPLCONF => Some(Value::String("OK".into())),
+            Command::RPUSH => Some(handle_rpush(args, &self.config.store).await?),
+            Command::SET => Some(handle_set(args, &self.config.store).await?),
             Command::TYPE => Some(self.handle_type(args).await?),
+            Command::WAIT => Some(self.handle_wait(args).await?),
             Command::XADD => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRANGE => Some(self.handle_xrange(args).await?),
             Command::XREAD => Some(self.handle_xread(args).await?),
-            Command::INCR => Some(handle_incr(args, &self.config.store).await?),
-            Command::MULTI => {
-                self.queued_commands = Some(Vec::new());
-                Some(Value::String("OK".into()))
-            }
-            Command::EXEC => bail!(RedisError::CommandWithoutMulti(command)),
-            Command::DISCARD => bail!(RedisError::CommandWithoutMulti(command)),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -235,7 +236,6 @@ impl Server {
         if args.len() < 2 {
             bail!(RedisError::InvalidArgument);
         }
-
         let cmd = unpack_bulk_string(&args[0])?;
         let cmd = Command::from_str(cmd)?;
         let res = match cmd {
@@ -265,7 +265,6 @@ impl Server {
         if args.len() != 1 {
             bail!(RedisError::InvalidArgument);
         }
-
         let pattern = unpack_bulk_string(&args[0])?;
         let keys = self.config.store.keys(pattern).await?;
         Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
@@ -276,12 +275,12 @@ impl Server {
         if args.len() != 1 {
             bail!(RedisError::InvalidArgument);
         }
-
         let key = unpack_bulk_string(&args[0])?;
         let value = self.config.store.get(key).await;
         let res = match value {
             Some(RecordType::String(_)) => Value::Bulk("string".into()),
             Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
+            Some(RecordType::List(_)) => Value::Bulk("list".into()),
             None => Value::Bulk("none".into()),
         };
         Ok(res)
@@ -465,12 +464,11 @@ pub async fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
         bail!(RedisError::InvalidArgument);
     }
-
     let key = unpack_bulk_string(&args[0])?;
     match store.get(key).await {
         Some(RecordType::String(s)) => Ok(Value::Bulk(s.to_string())),
-        Some(RecordType::Stream(_)) => unimplemented!(),
         None => Ok(Value::Null),
+        _ => unimplemented!(),
     }
 }
 
@@ -482,7 +480,6 @@ pub async fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
 
     let key = unpack_bulk_string(&args[0])?;
     let entry_id = unpack_bulk_string(&args[1])?;
-
     let values = args[2..]
         .chunks(2)
         .map(|pair| match pair {
@@ -509,8 +506,21 @@ pub async fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
         bail!(RedisError::InvalidArgument);
     }
-
     let key = unpack_bulk_string(&args[0])?;
     let value = store.incr(key).await?;
     Ok(Value::Integer(value))
+}
+
+// RPUSH key element [element ...]
+pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
+    if args.is_empty() {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let elements = args[1..]
+        .iter()
+        .map(|v| unpack_bulk_string(v))
+        .collect::<Result<Vec<_>>>()?;
+    let count = store.rpush(key, &elements).await?;
+    Ok(Value::Integer(count))
 }

@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
+    fmt,
     str::FromStr,
     time::SystemTime,
 };
@@ -186,9 +187,9 @@ impl Ord for StreamEntryId {
     }
 }
 
-impl ToString for StreamEntryId {
-    fn to_string(&self) -> String {
-        format!("{}-{}", self.ts_ms, self.seq_no)
+impl fmt::Display for StreamEntryId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.ts_ms, self.seq_no)
     }
 }
 

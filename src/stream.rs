@@ -102,8 +102,7 @@ impl StreamRecord {
                 Ok(StreamEntryId::new(ts_ms, 0))
             }
         } else {
-            entry_id.parse().map_err(anyhow::Error::from)
-        }
+            entry_id.parse()}
     }
 
     fn validate_entry_id(&mut self, entry_id: StreamEntryId) -> Result<()> {
@@ -120,7 +119,7 @@ impl StreamRecord {
     }
 
     pub fn subscribe(&mut self, id: StreamEntryId, tx: mpsc::Sender<(String, StreamValue)>) {
-        self.listeners.entry(id).or_insert_with(Vec::new).push(tx);
+        self.listeners.entry(id).or_default().push(tx);
     }
 }
 
@@ -137,7 +136,7 @@ impl StreamValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StreamEntryId {
     ts_ms: u128,
     seq_no: u64,
@@ -176,6 +175,12 @@ impl StreamEntryId {
         ts_ms: u128::MAX,
         seq_no: u64::MAX,
     };
+}
+
+impl PartialOrd for StreamEntryId {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 impl Ord for StreamEntryId {

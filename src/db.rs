@@ -62,7 +62,7 @@ impl Store {
             if path.exists() {
                 let file = fs::File::open(&path)?;
                 let instance = Instance::new(file)?;
-                return instance.get_db(0).map(|db| db.clone());
+                return instance.get_db(0).cloned();
             }
         }
         Self::empty()
@@ -121,6 +121,26 @@ impl Store {
                 list.push_back(element.to_string());
             }
             Ok(list.len() as i64)
+        } else {
+            bail!(RedisError::WrongType)
+        }
+    }
+
+    pub async fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(Vec::new());
+        };
+        if let RecordType::List(list) = &data.record {
+            let len = list.len() as i64;
+            let start = if start < 0 { len + start } else { start };
+            let end = if end < 0 { len + end } else { end };
+            Ok(list
+                .iter()
+                .skip(start as usize)
+                .take((end - start + 1) as usize)
+                .cloned()
+                .collect())
         } else {
             bail!(RedisError::WrongType)
         }

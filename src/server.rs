@@ -45,14 +45,14 @@ impl Server {
             }
 
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            while let Some(cmd_line) = decoder.decode().ok() {
+            while let Ok(cmd_line) = decoder.decode() {
                 match self.process(&cmd_line).await {
                     Ok(Some(response)) => {
                         self.stream.write_all(&response.encode()).await?;
                     }
                     Ok(None) => (),
                     Err(e) => {
-                        eprintln!("Error processing command: {}", e);
+                        eprintln!("Error processing command: {e}");
                         self.stream
                             .write_all(&Value::Error(e.to_string()).encode())
                             .await?;
@@ -99,7 +99,7 @@ impl Server {
 
         if let Some(queued_commands) = &mut self.queued_commands {
             let response = match command {
-                Command::EXEC => {
+                Command::Exec => {
                     let commands = self.queued_commands.take().unwrap();
                     let mut responses = Vec::with_capacity(commands.len());
                     for cmd in commands {
@@ -107,14 +107,14 @@ impl Server {
                             Ok(Some(result)) => responses.push(result),
                             Ok(None) => (),
                             Err(e) => {
-                                eprintln!("Error processing command: {}", e);
+                                eprintln!("Error processing command: {e}");
                                 responses.push(Value::Error(e.to_string()));
                             }
                         }
                     }
                     Some(Value::Array(responses))
                 }
-                Command::DISCARD => {
+                Command::Discard => {
                     self.queued_commands = None;
                     Some(Value::String("OK".into()))
                 }
@@ -127,33 +127,34 @@ impl Server {
         }
 
         let response = match command {
-            Command::CONFIG => Some(self.handle_config(args)?),
-            Command::DISCARD => bail!(RedisError::CommandWithoutMulti(command)),
-            Command::ECHO => Some(handle_echo(args)?),
-            Command::EXEC => bail!(RedisError::CommandWithoutMulti(command)),
-            Command::GET => Some(handle_get(args, &self.config.store).await?),
-            Command::INCR => Some(handle_incr(args, &self.config.store).await?),
-            Command::INFO => Some(self.handle_info()),
-            Command::KEYS => Some(self.handle_keys(args).await?),
-            Command::MULTI => {
+            Command::Config => Some(self.handle_config(args)?),
+            Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::Echo => Some(handle_echo(args)?),
+            Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::Get => Some(handle_get(args, &self.config.store).await?),
+            Command::Incr => Some(handle_incr(args, &self.config.store).await?),
+            Command::Info => Some(self.handle_info()),
+            Command::Keys => Some(self.handle_keys(args).await?),
+            Command::Lrange => Some(self.handle_lrange(args).await?),
+            Command::Multi => {
                 self.queued_commands = Some(Vec::new());
                 Some(Value::String("OK".into()))
             }
-            Command::PING => Some(Value::String("PONG".into())),
-            Command::PSYNC => {
+            Command::Ping => Some(Value::String("PONG".into())),
+            Command::Psync => {
                 if let Err(e) = self.handle_psync().await {
-                    eprintln!("Error handling PSYNC: {:?}", e);
+                    eprintln!("Error handling PSYNC: {e:?}");
                 }
                 None
             }
-            Command::REPLCONF => Some(Value::String("OK".into())),
-            Command::RPUSH => Some(handle_rpush(args, &self.config.store).await?),
-            Command::SET => Some(handle_set(args, &self.config.store).await?),
-            Command::TYPE => Some(self.handle_type(args).await?),
-            Command::WAIT => Some(self.handle_wait(args).await?),
-            Command::XADD => Some(handle_xadd(args, &self.config.store).await?),
-            Command::XRANGE => Some(self.handle_xrange(args).await?),
-            Command::XREAD => Some(self.handle_xread(args).await?),
+            Command::Replconf => Some(Value::String("OK".into())),
+            Command::Rpush => Some(handle_rpush(args, &self.config.store).await?),
+            Command::Set => Some(handle_set(args, &self.config.store).await?),
+            Command::Type => Some(self.handle_type(args).await?),
+            Command::Wait => Some(self.handle_wait(args).await?),
+            Command::Xadd => Some(handle_xadd(args, &self.config.store).await?),
+            Command::Xrange => Some(self.handle_xrange(args).await?),
+            Command::Xread => Some(self.handle_xread(args).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -168,6 +169,35 @@ impl Server {
         Ok(response)
     }
 
+    // CONFIG GET parameter
+    fn handle_config(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let cmd = unpack_bulk_string(&args[0])?;
+        let cmd = Command::from_str(cmd)?;
+        let res = match cmd {
+            Command::Get => {
+                let name = unpack_bulk_string(&args[1])?;
+                let value = match name.to_lowercase().as_str() {
+                    "dir" => Value::Bulk(
+                        self.config
+                            .dir
+                            .clone()
+                            .into_os_string()
+                            .into_string()
+                            .unwrap_or_default(),
+                    ),
+                    "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
+                    option => bail!("Unsupported CONFIG option: {}", option),
+                };
+                Value::Array(vec![Value::Bulk(name.to_string()), value])
+            }
+            cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
+        };
+        Ok(res)
+    }
+
     // INFO
     fn handle_info(&self) -> Value {
         let value = format!(
@@ -175,6 +205,29 @@ impl Server {
             self.config.role
         );
         Value::Bulk(value)
+    }
+
+    // KEYS pattern
+    async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 1 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let pattern = unpack_bulk_string(&args[0])?;
+        let keys = self.config.store.keys(pattern).await?;
+        Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
+    }
+
+    // LRANGE key start stop
+    async fn handle_lrange(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 3 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let start = unpack_bulk_string(&args[1])?.parse::<i64>()?;
+        let end = unpack_bulk_string(&args[2])?.parse::<i64>()?;
+
+        let values = self.config.store.lrange(key, start, end).await?;
+        Ok(Value::Array(values.into_iter().map(Value::Bulk).collect()))
     }
 
     // PSYNC replicationid offset
@@ -192,9 +245,25 @@ impl Server {
         Ok(())
     }
 
+    // TYPE key
+    async fn handle_type(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 1 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let value = self.config.store.get(key).await;
+        let res = match value {
+            Some(RecordType::String(_)) => Value::Bulk("string".into()),
+            Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
+            Some(RecordType::List(_)) => Value::Bulk("list".into()),
+            None => Value::Bulk("none".into()),
+        };
+        Ok(res)
+    }
+
     // WAIT numreplicas timeout
     async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
-        if args.len() < 2 {
+        if args.len() != 2 {
             bail!(RedisError::InvalidArgument);
         }
         let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
@@ -204,7 +273,7 @@ impl Server {
             return Ok(Value::Integer(self.count_active_replicas() as i64));
         }
 
-        let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::SET) {
+        let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::Set) {
             sleep(Duration::from_millis(timeout_ms)).await;
             self.count_active_replicas()
         } else {
@@ -231,64 +300,13 @@ impl Server {
         Ok(Value::Integer(responded as i64))
     }
 
-    // CONFIG GET parameter
-    fn handle_config(&self, args: &[Value]) -> Result<Value> {
-        if args.len() < 2 {
-            bail!(RedisError::InvalidArgument);
-        }
-        let cmd = unpack_bulk_string(&args[0])?;
-        let cmd = Command::from_str(cmd)?;
-        let res = match cmd {
-            Command::GET => {
-                let name = unpack_bulk_string(&args[1])?;
-                let value = match name.to_lowercase().as_str() {
-                    "dir" => Value::Bulk(
-                        self.config
-                            .dir
-                            .clone()
-                            .into_os_string()
-                            .into_string()
-                            .unwrap_or_default(),
-                    ),
-                    "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
-                    option => bail!("Unsupported CONFIG option: {}", option),
-                };
-                Value::Array(vec![Value::Bulk(name.to_string()), value])
-            }
-            cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
-        };
-        Ok(res)
-    }
-
-    // KEYS pattern
-    async fn handle_keys(&self, args: &[Value]) -> Result<Value> {
-        if args.len() != 1 {
-            bail!(RedisError::InvalidArgument);
-        }
-        let pattern = unpack_bulk_string(&args[0])?;
-        let keys = self.config.store.keys(pattern).await?;
-        Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
-    }
-
-    // TYPE key
-    async fn handle_type(&self, args: &[Value]) -> Result<Value> {
-        if args.len() != 1 {
-            bail!(RedisError::InvalidArgument);
-        }
-        let key = unpack_bulk_string(&args[0])?;
-        let value = self.config.store.get(key).await;
-        let res = match value {
-            Some(RecordType::String(_)) => Value::Bulk("string".into()),
-            Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
-            Some(RecordType::List(_)) => Value::Bulk("list".into()),
-            None => Value::Bulk("none".into()),
-        };
-        Ok(res)
+    fn count_active_replicas(&self) -> usize {
+        self.config.tx.receiver_count()
     }
 
     // XRANGE key start end
     async fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
-        if args.len() < 3 {
+        if args.len() != 3 {
             bail!(RedisError::InvalidArgument);
         }
 
@@ -373,10 +391,6 @@ impl Server {
                 .collect();
             Ok(Value::Array(values))
         }
-    }
-
-    fn count_active_replicas(&self) -> usize {
-        self.config.tx.receiver_count()
     }
 }
 

@@ -77,6 +77,9 @@ impl Follower {
                 server::handle_incr(args, &self.store).await?;
             }
             Command::Ping => {}
+            Command::LPop => {
+                server::handle_lpop(args, &self.store).await?;
+            }
             Command::LPush => {
                 server::handle_lpush(args, &self.store).await?;
             }

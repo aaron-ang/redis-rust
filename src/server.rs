@@ -136,6 +136,7 @@ impl Server {
             Command::Info => Some(self.handle_info()),
             Command::Keys => Some(self.handle_keys(args).await?),
             Command::LLen => Some(self.handle_llen(args).await?),
+            Command::LPop => Some(handle_lpop(args, &self.config.store).await?),
             Command::LPush => Some(handle_lpush(args, &self.config.store).await?),
             Command::LRange => Some(self.handle_lrange(args).await?),
             Command::Multi => {
@@ -462,9 +463,7 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
 
     let key = unpack_bulk_string(&args[0])?;
     let value = unpack_bulk_string(&args[1])?;
-    let mut expiry: Option<SystemTime> = None;
-
-    if let Some(Value::Bulk(option)) = args.get(2) {
+    let expiry = if let Some(Value::Bulk(option)) = args.get(2) {
         match option.to_lowercase().as_str() {
             "px" => {
                 let ms = match args.get(3) {
@@ -474,11 +473,13 @@ pub async fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
                     },
                     _ => bail!(RedisError::InvalidArgument),
                 };
-                expiry = Some(SystemTime::now() + Duration::from_millis(ms));
+                Some(SystemTime::now() + Duration::from_millis(ms))
             }
             option => bail!("Unsupported SET option: {}", option),
         }
-    }
+    } else {
+        None
+    };
 
     store.set(key.to_string(), value.into(), expiry).await;
     Ok(Value::String("OK".into()))
@@ -548,6 +549,42 @@ pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     let count = store.rpush(key, &elements).await?;
     Ok(Value::Integer(count))
+}
+
+// LPOP key [count]
+pub async fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
+    if args.is_empty() {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let count = match args.get(1) {
+        Some(Value::Bulk(c)) => {
+            let parsed = c.parse::<i64>()?;
+            if parsed < 0 {
+                bail!(RedisError::InvalidInteger);
+            }
+            Some(parsed as usize)
+        }
+        Some(Value::Integer(c)) => {
+            if *c < 0 {
+                bail!(RedisError::InvalidInteger);
+            }
+            Some(*c as usize)
+        }
+        None => None,
+        _ => bail!(RedisError::InvalidArgument),
+    };
+
+    let elements: Vec<String> = store.lpop(key, count.unwrap_or(1)).await?;
+    if elements.is_empty() {
+        Ok(Value::Null)
+    } else if count.is_none() {
+        Ok(Value::Bulk(elements[0].clone()))
+    } else {
+        Ok(Value::Array(
+            elements.into_iter().map(Value::Bulk).collect(),
+        ))
+    }
 }
 
 // LPUSH key element [element ...]

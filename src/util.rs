@@ -2,6 +2,7 @@ use anyhow::Result;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::{
     collections::HashMap,
+    fmt,
     io::Read,
     str::FromStr,
     time::{Duration, UNIX_EPOCH},
@@ -15,29 +16,33 @@ use crate::db::{RecordType, RedisData, Store};
 #[derive(Debug, Clone, Copy, PartialEq, Display, EnumString)]
 #[strum(ascii_case_insensitive)]
 pub enum Command {
-    PING,
-    ECHO,
-    SET,
-    GET,
-    INFO,
-    REPLCONF,
-    PSYNC,
-    WAIT,
     CONFIG,
+    DISCARD,
+    ECHO,
+    EXEC,
+    GET,
+    INCR,
+    INFO,
     KEYS,
+    MULTI,
+    PING,
+    PSYNC,
+    REPLCONF,
+    RPUSH,
+    SET,
     TYPE,
+    WAIT,
     XADD,
     XRANGE,
     XREAD,
-    INCR,
-    MULTI,
-    EXEC,
-    DISCARD,
 }
 
 impl Command {
     pub fn is_write(&self) -> bool {
-        matches!(self, Command::SET | Command::XADD | Command::INCR)
+        matches!(
+            self,
+            Command::INCR | Command::SET | Command::XADD | Command::RPUSH
+        )
     }
 }
 
@@ -265,11 +270,11 @@ impl StringRecord {
     }
 }
 
-impl ToString for StringRecord {
-    fn to_string(&self) -> String {
+impl fmt::Display for StringRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StringRecord::String(s) => s.clone(),
-            StringRecord::Integer(i) => i.to_string(),
+            StringRecord::String(s) => write!(f, "{}", s),
+            StringRecord::Integer(i) => write!(f, "{}", i),
         }
     }
 }

@@ -135,10 +135,12 @@ impl Store {
             let len = list.len() as i64;
             let start = if start < 0 { len + start } else { start };
             let end = if end < 0 { len + end } else { end };
+            let start = start.max(0) as usize;
+            let end = end.min(len - 1) as usize;
             Ok(list
                 .iter()
-                .skip(start as usize)
-                .take((end - start + 1) as usize)
+                .skip(start)
+                .take(end - start + 1)
                 .cloned()
                 .collect())
         } else {

@@ -126,6 +126,22 @@ impl Store {
         }
     }
 
+    pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
+        let mut storage = self.entries.write().await;
+        let data = storage
+            .entry(key.to_string())
+            .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
+
+        if let RecordType::List(list) = &mut data.record {
+            for element in elements {
+                list.push_front(element.to_string());
+            }
+            Ok(list.len() as i64)
+        } else {
+            bail!(RedisError::WrongType)
+        }
+    }
+
     pub async fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let storage = self.entries.read().await;
         let Some(data) = storage.get(key) else {

@@ -24,25 +24,26 @@ pub enum Command {
     Incr,
     Info,
     Keys,
-    Lrange,
+    LPush,
+    LRange,
     Multi,
     Ping,
-    Psync,
-    Replconf,
-    Rpush,
+    PSync,
+    ReplConf,
+    RPush,
     Set,
     Type,
     Wait,
-    Xadd,
-    Xrange,
-    Xread,
+    XAdd,
+    XRange,
+    XRead,
 }
 
 impl Command {
     pub fn is_write(&self) -> bool {
         matches!(
             self,
-            Command::Incr | Command::Set | Command::Xadd | Command::Rpush
+            Command::Incr | Command::Set | Command::XAdd | Command::LPush | Command::RPush
         )
     }
 }

@@ -164,6 +164,18 @@ impl Store {
         }
     }
 
+    pub async fn llen(&self, key: &str) -> Result<i64> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(0);
+        };
+        if let RecordType::List(list) = &data.record {
+            Ok(list.len() as i64)
+        } else {
+            bail!(RedisError::WrongType)
+        }
+    }
+
     pub async fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();

@@ -24,6 +24,7 @@ pub enum Command {
     Incr,
     Info,
     Keys,
+    LLen,
     LPush,
     LRange,
     Multi,

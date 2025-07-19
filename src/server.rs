@@ -135,6 +135,7 @@ impl Server {
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
             Command::Info => Some(self.handle_info()),
             Command::Keys => Some(self.handle_keys(args).await?),
+            Command::LLen => Some(self.handle_llen(args).await?),
             Command::LPush => Some(handle_lpush(args, &self.config.store).await?),
             Command::LRange => Some(self.handle_lrange(args).await?),
             Command::Multi => {
@@ -216,6 +217,15 @@ impl Server {
         let pattern = unpack_bulk_string(&args[0])?;
         let keys = self.config.store.keys(pattern).await?;
         Ok(Value::Array(keys.into_iter().map(Value::Bulk).collect()))
+    }
+
+    // LLEN key
+    async fn handle_llen(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        Ok(Value::Integer(self.config.store.llen(key).await?))
     }
 
     // LRANGE key start stop

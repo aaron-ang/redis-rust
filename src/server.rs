@@ -127,6 +127,7 @@ impl Server {
         }
 
         let response = match command {
+            Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
             Command::Config => Some(self.handle_config(args)?),
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
@@ -363,7 +364,7 @@ impl Server {
             }
         }
 
-        let stream_args: Vec<&Value> = args_iter.collect();
+        let stream_args = args_iter.collect::<Vec<_>>();
         if stream_args.len() % 2 != 0 {
             bail!(RedisError::InvalidArgument);
         }
@@ -574,8 +575,8 @@ pub async fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
         None => None,
         _ => bail!(RedisError::InvalidArgument),
     };
+    let elements = store.lpop(key, count.unwrap_or(1)).await?;
 
-    let elements: Vec<String> = store.lpop(key, count.unwrap_or(1)).await?;
     if elements.is_empty() {
         Ok(Value::Null)
     } else if count.is_none() {
@@ -599,4 +600,27 @@ pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     let count = store.lpush(key, &elements).await?;
     Ok(Value::Integer(count))
+}
+
+// BLPOP key [key ...] timeout
+pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 2 {
+        bail!(RedisError::InvalidArgument);
+    }
+
+    let timeout = match args.last() {
+        Some(Value::Bulk(t)) => t.parse::<u64>()?,
+        _ => bail!(RedisError::InvalidArgument),
+    };
+    let keys = args[..args.len() - 1]
+        .iter()
+        .map(|v| unpack_bulk_string(v))
+        .collect::<Result<Vec<_>>>()?;
+    let elements = store.blpop(&keys, timeout).await?;
+
+    if let Some((key, value)) = elements {
+        Ok(Value::Array(vec![Value::Bulk(key), Value::Bulk(value)]))
+    } else {
+        Ok(Value::Null)
+    }
 }

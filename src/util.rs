@@ -16,6 +16,7 @@ use crate::db::{RecordType, RedisData, Store};
 #[derive(Debug, Clone, Copy, PartialEq, Display, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
+    BLPop,
     Config,
     Discard,
     Echo,
@@ -45,7 +46,8 @@ impl Command {
     pub fn is_write(&self) -> bool {
         matches!(
             self,
-            Command::Incr
+            Command::BLPop
+                | Command::Incr
                 | Command::Set
                 | Command::XAdd
                 | Command::LPop

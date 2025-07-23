@@ -70,6 +70,9 @@ impl Follower {
 
     async fn handle_command(&mut self, command: Command, args: &[Value]) -> Result<()> {
         match command {
+            Command::BLPop => {
+                server::handle_blpop(args, &self.store).await?;
+            }
             Command::Get => {
                 server::handle_get(args, &self.store).await?;
             }

@@ -15,6 +15,7 @@ pub struct Config {
     pub dir: PathBuf,
     pub dbfilename: String,
     pub role: ReplicaType,
+    pub replicaof: Option<String>,
     pub store: Arc<Store>,
     pub tx: Arc<broadcast::Sender<Value>>,
     pub rep_state: Arc<ReplicationState>,
@@ -27,6 +28,7 @@ impl Config {
         dbfilename: Option<String>,
         store: Arc<Store>,
         role: ReplicaType,
+        replicaof: Option<String>,
     ) -> Self {
         let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
 
@@ -36,6 +38,7 @@ impl Config {
             dbfilename: dbfilename.unwrap_or_else(|| DEFAULT_DBFILE.to_string()),
             store,
             role,
+            replicaof,
             tx: Arc::new(tx),
             rep_state: Arc::new(ReplicationState::new()),
         }

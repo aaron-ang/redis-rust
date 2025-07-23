@@ -1,4 +1,5 @@
 use anyhow::{bail, Result};
+use futures::future::select_all;
 use glob::Pattern;
 use std::{
     collections::{HashMap, VecDeque},
@@ -8,8 +9,8 @@ use std::{
     time::SystemTime,
 };
 use tokio::{
-    sync::{mpsc, RwLock},
-    time,
+    sync::{mpsc, Notify, RwLock},
+    time::{self, Duration, Instant},
 };
 
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
@@ -53,6 +54,7 @@ impl RedisData {
 #[derive(Clone)]
 pub struct Store {
     entries: Arc<RwLock<HashMap<String, RedisData>>>,
+    list_notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
 }
 
 impl Store {
@@ -75,6 +77,7 @@ impl Store {
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
             entries: Arc::new(RwLock::new(entries)),
+            list_notifiers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -111,18 +114,72 @@ impl Store {
     }
 
     pub async fn rpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
-        let mut storage = self.entries.write().await;
-        let data = storage
-            .entry(key.to_string())
-            .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
+        let len = {
+            let mut storage = self.entries.write().await;
+            let data = storage
+                .entry(key.to_string())
+                .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
 
-        if let RecordType::List(list) = &mut data.record {
-            for element in elements {
-                list.push_back(element.to_string());
+            if let RecordType::List(list) = &mut data.record {
+                for element in elements {
+                    list.push_back(element.to_string());
+                }
+                list.len() as i64
+            } else {
+                bail!(RedisError::WrongType)
             }
-            Ok(list.len() as i64)
-        } else {
-            bail!(RedisError::WrongType)
+        };
+        self.notify_list_waiters(key).await;
+        Ok(len)
+    }
+
+    pub async fn blpop(&self, keys: &[&str], timeout: u64) -> Result<Option<(String, String)>> {
+        let notifiers = {
+            let mut map = self.list_notifiers.write().await;
+            keys.iter()
+                .map(|&key| {
+                    map.entry(key.to_string())
+                        .or_insert_with(|| Arc::new(Notify::new()))
+                        .clone()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let start = Instant::now();
+        let deadline = Duration::from_secs(timeout);
+
+        loop {
+            // Check for immediate data
+            {
+                let mut storage = self.entries.write().await;
+                for &key in keys {
+                    if let Some(data) = storage.get_mut(key) {
+                        if let RecordType::List(list) = &mut data.record {
+                            if let Some(val) = list.pop_front() {
+                                return Ok(Some((key.to_string(), val)));
+                            }
+                        } else {
+                            bail!(RedisError::WrongType);
+                        }
+                    }
+                }
+            }
+
+            // Wait for notification on any key
+            let wait_all = select_all(notifiers.iter().map(|n| Box::pin(n.notified())));
+
+            if timeout == 0 {
+                wait_all.await;
+            } else {
+                let elapsed = start.elapsed();
+                if elapsed >= deadline {
+                    return Ok(None);
+                }
+                let remaining = deadline - elapsed;
+                if time::timeout(remaining, wait_all).await.is_err() {
+                    return Ok(None);
+                }
+            }
         }
     }
 
@@ -139,18 +196,29 @@ impl Store {
     }
 
     pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
-        let mut storage = self.entries.write().await;
-        let data = storage
-            .entry(key.to_string())
-            .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
+        let len = {
+            let mut storage = self.entries.write().await;
+            let data = storage
+                .entry(key.to_string())
+                .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
 
-        if let RecordType::List(list) = &mut data.record {
-            for element in elements {
-                list.push_front(element.to_string());
+            if let RecordType::List(list) = &mut data.record {
+                for element in elements {
+                    list.push_front(element.to_string());
+                }
+                list.len() as i64
+            } else {
+                bail!(RedisError::WrongType)
             }
-            Ok(list.len() as i64)
-        } else {
-            bail!(RedisError::WrongType)
+        };
+        self.notify_list_waiters(key).await;
+        Ok(len)
+    }
+
+    async fn notify_list_waiters(&self, key: &str) {
+        let notifiers = self.list_notifiers.read().await;
+        if let Some(n) = notifiers.get(key) {
+            n.notify_waiters();
         }
     }
 

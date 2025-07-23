@@ -609,7 +609,7 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
     }
 
     let timeout = match args.last() {
-        Some(Value::Bulk(t)) => t.parse::<u64>()?,
+        Some(Value::Bulk(t)) => t.parse::<f64>()?,
         _ => bail!(RedisError::InvalidArgument),
     };
     let keys = args[..args.len() - 1]

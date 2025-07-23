@@ -9,8 +9,8 @@ use std::{
     time::SystemTime,
 };
 use tokio::{
-    sync::{mpsc, Notify, RwLock},
-    time::{self, Duration, Instant},
+    sync::{mpsc, oneshot, RwLock},
+    time::{self, Duration},
 };
 
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
@@ -54,7 +54,7 @@ impl RedisData {
 #[derive(Clone)]
 pub struct Store {
     entries: Arc<RwLock<HashMap<String, RedisData>>>,
-    list_notifiers: Arc<RwLock<HashMap<String, Arc<Notify>>>>,
+    list_waiters: Arc<RwLock<HashMap<String, VecDeque<oneshot::Sender<()>>>>>,
 }
 
 impl Store {
@@ -77,14 +77,16 @@ impl Store {
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
             entries: Arc::new(RwLock::new(entries)),
-            list_notifiers: Arc::new(RwLock::new(HashMap::new())),
+            list_waiters: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     async fn notify_list_waiters(&self, key: &str) {
-        let notifiers = self.list_notifiers.read().await;
-        if let Some(n) = notifiers.get(key) {
-            n.notify_waiters();
+        let mut waiters = self.list_waiters.write().await;
+        if let Some(queue) = waiters.get_mut(key) {
+            if let Some(sender) = queue.pop_front() {
+                let _ = sender.send(()); // Notify the first waiter
+            }
         }
     }
 
@@ -142,7 +144,7 @@ impl Store {
 
     pub async fn blpop(&self, keys: &[&str], timeout: f64) -> Result<Option<(String, String)>> {
         let deadline = if timeout > 0.0 {
-            Some(Instant::now() + Duration::from_secs_f64(timeout))
+            Some(time::Instant::now() + Duration::from_secs_f64(timeout))
         } else {
             None
         };
@@ -157,48 +159,38 @@ impl Store {
                             if let Some(val) = list.pop_front() {
                                 return Ok(Some((key.to_string(), val)));
                             }
-                        } else {
-                            bail!(RedisError::WrongType);
                         }
                     }
                 }
             }
 
-            // 2. Check for timeout before attempting to wait.
-            let remaining = if let Some(d) = deadline {
-                d.checked_duration_since(Instant::now())
-            } else {
-                None // Represents an infinite wait.
-            };
-
-            if deadline.is_some() && remaining.is_none() {
-                return Ok(None); // Timeout has passed.
+            // 2. Register a waiter for each key
+            let mut receivers = Vec::new();
+            {
+                let mut waiters = self.list_waiters.write().await;
+                for &key in keys {
+                    let (tx, rx) = oneshot::channel();
+                    waiters.entry(key.to_string()).or_default().push_back(tx);
+                    receivers.push(rx);
+                }
             }
 
-            // 3. Prepare to wait for a notification on any key.
-            let notifiers = {
-                let mut map = self.list_notifiers.write().await;
-                keys.iter()
-                    .map(|&key| {
-                        map.entry(key.to_string())
-                            .or_insert_with(|| Arc::new(Notify::new()))
-                            .clone()
-                    })
-                    .collect::<Vec<_>>()
-            };
-            let wait_futures = notifiers.iter().map(|n| Box::pin(n.notified()));
-            let wait_all = select_all(wait_futures);
-
-            // 4. Wait with or without a timeout.
-            if let Some(rem) = remaining {
-                if time::timeout(rem, wait_all).await.is_err() {
-                    return Ok(None); // Timeout elapsed.
+            // 3. Wait for a notification or timeout
+            let wait_all = select_all(receivers);
+            if let Some(deadline) = deadline {
+                let now = time::Instant::now();
+                if now >= deadline {
+                    return Ok(None);
+                }
+                let timeout = deadline - now;
+                if time::timeout(timeout, wait_all).await.is_err() {
+                    return Ok(None);
                 }
             } else {
-                wait_all.await; // Wait forever.
+                let _ = wait_all.await;
             }
 
-            // 5. After waking up, loop again to re-check for data.
+            // 4. Loop back to check for data again
         }
     }
 

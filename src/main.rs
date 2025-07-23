@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{bail, Result};
 use clap::Parser;
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
@@ -37,6 +37,12 @@ async fn main() -> Result<()> {
 
     println!("Server listening on {addr}");
 
+    if let ReplicaType::Follower = config.role {
+        if let Some(replicaof) = &config.replicaof {
+            spawn_follower_connection(replicaof, config.clone()).await?;
+        }
+    }
+
     loop {
         let (stream, addr) = listener.accept().await?;
         let config = config.clone();
@@ -53,7 +59,7 @@ async fn main() -> Result<()> {
 async fn setup_config() -> Result<Config> {
     let args = Args::parse();
     let store = Arc::new(Store::from_path(&args.dir, &args.dbfilename)?);
-    let role = setup_replication(&args, store.clone()).await?;
+    let role = determine_role(&args);
 
     Ok(Config::new(
         args.port,
@@ -61,40 +67,22 @@ async fn setup_config() -> Result<Config> {
         args.dbfilename,
         store,
         role,
+        args.replicaof,
     ))
 }
 
-async fn setup_replication(args: &Args, store: Arc<Store>) -> Result<ReplicaType> {
-    match parse_replica(args) {
-        Some((host, leader_port)) => {
-            spawn_follower(&host, leader_port, args.port, store).await?;
-            Ok(ReplicaType::Follower)
-        }
-        None => Ok(ReplicaType::Leader),
+fn determine_role(args: &Args) -> ReplicaType {
+    if args.replicaof.is_some() {
+        ReplicaType::Follower
+    } else {
+        ReplicaType::Leader
     }
 }
 
-fn parse_replica(args: &Args) -> Option<(String, u16)> {
-    args.replicaof.as_ref().and_then(|replicaof| {
-        let mut parts = replicaof.split_whitespace();
-        match (parts.next(), parts.next()) {
-            (Some(host), Some(port_str)) => port_str
-                .parse::<u16>()
-                .ok()
-                .map(|port| (host.to_string(), port)),
-            _ => None,
-        }
-    })
-}
-
-async fn spawn_follower(
-    host: &str,
-    leader_port: u16,
-    follower_port: u16,
-    store: Arc<Store>,
-) -> Result<()> {
+async fn spawn_follower_connection(replicaof: &str, config: Config) -> Result<()> {
+    let (host, leader_port) = parse_replica_string(replicaof)?;
     let leader_stream = TcpStream::connect(format!("{host}:{leader_port}")).await?;
-    let mut follower = Follower::new(follower_port, store, leader_stream);
+    let mut follower = Follower::new(config.port, config.store, leader_stream);
 
     tokio::spawn(async move {
         if let Err(e) = follower.handle_conn().await {
@@ -103,4 +91,15 @@ async fn spawn_follower(
     });
 
     Ok(())
+}
+
+fn parse_replica_string(replicaof: &str) -> Result<(String, u16)> {
+    let mut parts = replicaof.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some(host), Some(port_str)) => port_str
+            .parse::<u16>()
+            .map_err(|e| anyhow::anyhow!("Invalid port: {}", e))
+            .map(|port| (host.to_string(), port)),
+        _ => bail!("Invalid replicaof format"),
+    }
 }

@@ -81,6 +81,13 @@ impl Store {
         }
     }
 
+    async fn notify_list_waiters(&self, key: &str) {
+        let notifiers = self.list_notifiers.read().await;
+        if let Some(n) = notifiers.get(key) {
+            n.notify_waiters();
+        }
+    }
+
     pub async fn get(&self, key: &str) -> Option<RecordType> {
         let storage = self.entries.read().await;
         let data = storage.get(key)?;
@@ -133,23 +140,15 @@ impl Store {
         Ok(len)
     }
 
-    pub async fn blpop(&self, keys: &[&str], timeout: u64) -> Result<Option<(String, String)>> {
-        let notifiers = {
-            let mut map = self.list_notifiers.write().await;
-            keys.iter()
-                .map(|&key| {
-                    map.entry(key.to_string())
-                        .or_insert_with(|| Arc::new(Notify::new()))
-                        .clone()
-                })
-                .collect::<Vec<_>>()
+    pub async fn blpop(&self, keys: &[&str], timeout: f64) -> Result<Option<(String, String)>> {
+        let deadline = if timeout > 0.0 {
+            Some(Instant::now() + Duration::from_secs_f64(timeout))
+        } else {
+            None
         };
 
-        let start = Instant::now();
-        let deadline = Duration::from_secs(timeout);
-
         loop {
-            // Check for immediate data
+            // 1. Non-blocking check for data, respecting key order.
             {
                 let mut storage = self.entries.write().await;
                 for &key in keys {
@@ -165,21 +164,41 @@ impl Store {
                 }
             }
 
-            // Wait for notification on any key
-            let wait_all = select_all(notifiers.iter().map(|n| Box::pin(n.notified())));
-
-            if timeout == 0 {
-                wait_all.await;
+            // 2. Check for timeout before attempting to wait.
+            let remaining = if let Some(d) = deadline {
+                d.checked_duration_since(Instant::now())
             } else {
-                let elapsed = start.elapsed();
-                if elapsed >= deadline {
-                    return Ok(None);
-                }
-                let remaining = deadline - elapsed;
-                if time::timeout(remaining, wait_all).await.is_err() {
-                    return Ok(None);
-                }
+                None // Represents an infinite wait.
+            };
+
+            if deadline.is_some() && remaining.is_none() {
+                return Ok(None); // Timeout has passed.
             }
+
+            // 3. Prepare to wait for a notification on any key.
+            let notifiers = {
+                let mut map = self.list_notifiers.write().await;
+                keys.iter()
+                    .map(|&key| {
+                        map.entry(key.to_string())
+                            .or_insert_with(|| Arc::new(Notify::new()))
+                            .clone()
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let wait_futures = notifiers.iter().map(|n| Box::pin(n.notified()));
+            let wait_all = select_all(wait_futures);
+
+            // 4. Wait with or without a timeout.
+            if let Some(rem) = remaining {
+                if time::timeout(rem, wait_all).await.is_err() {
+                    return Ok(None); // Timeout elapsed.
+                }
+            } else {
+                wait_all.await; // Wait forever.
+            }
+
+            // 5. After waking up, loop again to re-check for data.
         }
     }
 
@@ -213,13 +232,6 @@ impl Store {
         };
         self.notify_list_waiters(key).await;
         Ok(len)
-    }
-
-    async fn notify_list_waiters(&self, key: &str) {
-        let notifiers = self.list_notifiers.read().await;
-        if let Some(n) = notifiers.get(key) {
-            n.notify_waiters();
-        }
     }
 
     pub async fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {

@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::{
     sync::{mpsc, oneshot, RwLock},
-    time::{self, Duration},
+    time::{self, Duration, Instant},
 };
 
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
@@ -83,9 +83,12 @@ impl Store {
 
     async fn notify_list_waiters(&self, key: &str) {
         let mut waiters = self.list_waiters.write().await;
-        if let Some(queue) = waiters.get_mut(key) {
-            if let Some(sender) = queue.pop_front() {
-                let _ = sender.send(()); // Notify the first waiter
+        if let Some(wait_queue) = waiters.get_mut(key) {
+            // Notify the first waiter
+            while let Some(sender) = wait_queue.pop_front() {
+                if sender.send(()).is_ok() {
+                    return;
+                }
             }
         }
     }
@@ -144,7 +147,7 @@ impl Store {
 
     pub async fn blpop(&self, keys: &[&str], timeout: f64) -> Result<Option<(String, String)>> {
         let deadline = if timeout > 0.0 {
-            Some(time::Instant::now() + Duration::from_secs_f64(timeout))
+            Some(Instant::now() + Duration::from_secs_f64(timeout))
         } else {
             None
         };
@@ -159,6 +162,8 @@ impl Store {
                             if let Some(val) = list.pop_front() {
                                 return Ok(Some((key.to_string(), val)));
                             }
+                        } else {
+                            bail!(RedisError::WrongType);
                         }
                     }
                 }
@@ -178,12 +183,12 @@ impl Store {
             // 3. Wait for a notification or timeout
             let wait_all = select_all(receivers);
             if let Some(deadline) = deadline {
-                let now = time::Instant::now();
+                let now = Instant::now();
                 if now >= deadline {
                     return Ok(None);
                 }
-                let timeout = deadline - now;
-                if time::timeout(timeout, wait_all).await.is_err() {
+                let remaining_duration = deadline - now;
+                if time::timeout(remaining_duration, wait_all).await.is_err() {
                     return Ok(None);
                 }
             } else {

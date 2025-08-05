@@ -25,8 +25,12 @@ This Redis clone supports the following features:
     -   `XADD`: Appends a new entry to a stream.
     -   `XRANGE`: Returns a range of entries from a stream.
     -   `XREAD`: Reads entries from one or more streams.
+    -   `PUBLISH`: Posts a message to a channel.
+    -   `SUBSCRIBE`: Subscribes the client to the given channels.
+    -   `UNSUBSCRIBE`: Unsubscribes the client from the given channels.
 -   **Concurrency** ⚡: Utilizes an event loop model to handle multiple client connections concurrently.
 -   **RESP Protocol** 🗣️: Communicates with clients using the Redis Serialization Protocol (RESP).
 -   **Persistence** 💾: Supports RDB file persistence to save and load data.
 -   **Replication** 🔄: Implements master-replica replication for data redundancy and read scaling.
 -   **Streams** 🌊: Supports Redis Streams, a data structure that models a log.
+-   **Pub/Sub** 📢: Implements the publish/subscribe messaging paradigm.

@@ -3,7 +3,6 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use anyhow::Result;
 use tokio::sync::broadcast;
 
 const CHANNEL_CAPACITY: usize = 128;
@@ -22,11 +21,14 @@ impl PubSub {
             .subscribe()
     }
 
-    pub fn publish(&self, channel: &str, message: &str) -> Result<usize> {
-        let channels = self.channels.read().unwrap();
-        match channels.get(channel) {
-            Some(sender) => sender.send(message.to_string()).map_err(Into::into),
-            None => Ok(0),
+    pub fn publish(&self, channel: &str, message: &str) -> usize {
+        let Some(sender) = self.channels.read().unwrap().get(channel).cloned() else {
+            return 0;
+        };
+        if sender.receiver_count() == 0 {
+            self.channels.write().unwrap().remove(channel);
+            return 0;
         }
+        sender.send(message.to_string()).unwrap_or(0)
     }
 }

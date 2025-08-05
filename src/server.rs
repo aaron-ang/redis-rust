@@ -1,4 +1,9 @@
-use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
+use std::{
+    collections::{HashMap, HashSet},
+    io::BufReader,
+    str::FromStr,
+    time::SystemTime,
+};
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
@@ -6,7 +11,7 @@ use resp::{Decoder, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::broadcast::{self, error::RecvError},
+    sync::{broadcast::error::RecvError, mpsc},
     time::{sleep, timeout, Duration, Instant},
 };
 
@@ -15,15 +20,62 @@ use crate::db::{RecordType, Store};
 use crate::stream::StreamValue;
 use crate::util::{Command, RedisError, ReplicaType, XReadBlockType};
 
+struct Connection {
+    stream: TcpStream,
+    buffer: Vec<u8>,
+}
+
+impl Connection {
+    fn new(stream: TcpStream) -> Self {
+        Connection {
+            stream,
+            buffer: vec![0; 1024],
+        }
+    }
+
+    async fn read_value(&mut self) -> Result<Option<Value>> {
+        let bytes_read = self.stream.read(&mut self.buffer).await?;
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+        let mut decoder = Decoder::new(BufReader::new(&self.buffer[..bytes_read]));
+        let value = decoder.decode()?;
+        Ok(Some(value))
+    }
+
+    async fn read_value_with_timeout(&mut self, duration: Duration) -> Result<Option<Value>> {
+        match timeout(duration, self.read_value()).await {
+            Err(_) => Ok(None), // Timeout
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => Err(e),
+        }
+    }
+
+    async fn write_all(&mut self, bytes: &[u8]) -> Result<()> {
+        self.stream.write_all(bytes).await?;
+        Ok(())
+    }
+
+    async fn write_value(&mut self, value: &Value) -> Result<()> {
+        self.stream.write_all(&value.encode()).await?;
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> Result<()> {
+        self.stream.flush().await?;
+        Ok(())
+    }
+}
+
 pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 pub const REPL_OFFSET: usize = 0;
 pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
 
 pub struct Server {
     config: Config,
-    stream: TcpStream,
+    conn: Connection,
     replication: bool,
-    subscriptions: Option<HashMap<String, broadcast::Receiver<String>>>,
+    subscriptions: Option<HashSet<String>>,
     queued_commands: Option<Vec<Value>>,
 }
 
@@ -31,7 +83,7 @@ impl Server {
     pub fn new(config: Config, stream: TcpStream) -> Self {
         Server {
             config,
-            stream,
+            conn: Connection::new(stream),
             replication: false,
             subscriptions: None,
             queued_commands: None,
@@ -39,67 +91,60 @@ impl Server {
     }
 
     pub async fn handle_conn(&mut self) -> Result<()> {
-        let mut buf = vec![0; 1024];
-
         loop {
-            let bytes_read = match self.stream.read(&mut buf).await {
-                Ok(0) => {
-                    eprintln!("Client disconnected");
-                    break;
-                }
-                Ok(n) => n,
+            let value = match self.conn.read_value().await {
+                Ok(Some(value)) => value,
+                Ok(None) => break,
                 Err(e) => {
                     eprintln!("Error reading from stream: {e}");
                     break;
                 }
             };
 
-            let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
-            while let Ok(cmd_line) = decoder.decode() {
-                match self.process(&cmd_line).await {
-                    Ok(Some(response)) => {
-                        self.stream.write_all(&response.encode()).await?;
-                    }
-                    Ok(None) => (),
-                    Err(e) => {
-                        eprintln!("Error processing command: {e}");
-                        self.stream
-                            .write_all(&Value::Error(e.to_string()).encode())
-                            .await?;
-                    }
+            match self.process(&value).await {
+                Ok(Some(response)) => self.conn.write_value(&response).await?,
+                Ok(None) => (),
+                Err(e) => {
+                    eprintln!("Error processing command: {e}");
+                    self.conn.write_value(&Value::Error(e.to_string())).await?;
                 }
             }
 
             if self.replication {
-                self.handle_replication(&mut buf).await?;
+                self.handle_replication().await?;
             }
         }
         Ok(())
     }
 
-    async fn handle_replication(&mut self, buf: &mut [u8]) -> Result<()> {
+    async fn handle_replication(&mut self) -> Result<()> {
         let mut rx = self.config.replicas.subscribe();
+
         loop {
             match rx.recv().await {
-                Ok(v) => self.stream.write_all(&v.encode()).await?,
+                Ok(msg) => {
+                    self.conn.write_value(&msg).await?;
+                }
                 Err(RecvError::Closed) => {
-                    eprintln!("Channel closed");
+                    eprintln!("Replication channel closed");
                     break;
                 }
                 Err(RecvError::Lagged(n)) => {
-                    eprintln!("Lagged by {n} messages");
+                    eprintln!("Replication lagged by {n} messages");
                     continue;
                 }
             }
 
-            if let Ok(bytes_read) = timeout(Duration::from_millis(100), self.stream.read(buf)).await
+            // Check for incoming ACKs from replica
+            if let Ok(Some(_)) = self
+                .conn
+                .read_value_with_timeout(Duration::from_millis(100))
+                .await
             {
-                let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
-                while decoder.decode().ok().is_some() {
-                    self.config.rep_state.incr_num_ack().await;
-                }
+                self.config.rep_state.incr_num_ack().await;
             }
         }
+
         Ok(())
     }
 
@@ -295,15 +340,15 @@ impl Server {
     // PSYNC replicationid offset
     async fn handle_psync(&mut self) -> Result<()> {
         let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
-        self.stream.write_all(&msg.encode()).await?;
-
         let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
-        self.stream
-            .write_all(format!("${}\r\n", rdb.len()).as_bytes())
-            .await?;
-        self.stream.write_all(&rdb).await?;
-        self.stream.flush().await?;
+        let rdb_msg = format!("${}\r\n", rdb.len());
+
+        self.conn.write_value(&msg).await?;
+        self.conn.write_all(rdb_msg.as_bytes()).await?;
+        self.conn.write_all(&rdb).await?;
+        self.conn.flush().await?;
         self.replication = true;
+
         Ok(())
     }
 
@@ -318,25 +363,59 @@ impl Server {
             .map(|v| unpack_bulk_string(v))
             .collect::<Result<Vec<_>>>()?;
 
-        let subscriptions = self.subscriptions.get_or_insert_with(HashMap::new);
+        let subscriptions = self.subscriptions.get_or_insert_with(HashSet::new);
+
+        let (tx, mut rx) = mpsc::channel(10);
 
         for channel in channels {
-            if subscriptions.contains_key(channel) {
+            if subscriptions.contains(channel) {
                 continue;
             }
 
-            let rx = self.config.pubsub.subscribe(channel);
-            subscriptions.insert(channel.to_string(), rx);
+            let mut broadcast_rx = self.config.pubsub.subscribe(channel);
+            subscriptions.insert(channel.to_string());
 
             let response = Value::Array(vec![
                 Value::Bulk("subscribe".into()),
                 Value::String(channel.to_string()),
                 Value::Integer(subscriptions.len() as i64),
             ]);
-            self.stream.write_all(&response.encode()).await?;
+            self.conn.write_value(&response).await?;
+
+            let tx = tx.clone();
+            let channel = channel.to_string();
+            tokio::spawn(async move {
+                while let Ok(msg) = broadcast_rx.recv().await {
+                    if tx.send((channel.clone(), msg)).await.is_err() {
+                        break;
+                    }
+                }
+            });
         }
 
-        Ok(())
+        loop {
+            tokio::select! {
+            Some((channel, msg)) = rx.recv() => {
+                let response = Value::Array(vec![
+                    Value::Bulk("message".into()),
+                    Value::Bulk(channel),
+                    Value::Bulk(msg),
+                ]);
+                self.conn.write_value(&response).await?;
+            }
+            Ok(Some(value)) = self.conn.read_value() => {
+                match Box::pin(self.process(&value)).await {
+                        Ok(Some(response)) => self.conn.write_value(&response).await?,
+                        Ok(None) => (),
+                        Err(e) => {
+                            eprintln!("Error processing command: {e}");
+                            self.conn.write_value(&Value::Error(e.to_string())).await?;
+                        }
+                    }
+                }
+                else => return Ok(()),
+            }
+        }
     }
 
     // TYPE key

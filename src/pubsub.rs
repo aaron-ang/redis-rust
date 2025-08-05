@@ -29,4 +29,15 @@ impl PubSub {
             None => Ok(0),
         }
     }
+
+    pub fn unsubscribe(&self, channels: &[&str]) {
+        let mut channel_map = self.channels.write().unwrap();
+        if channels.is_empty() {
+            channel_map.clear();
+        } else {
+            for &channel in channels {
+                channel_map.remove(channel);
+            }
+        }
+    }
 }

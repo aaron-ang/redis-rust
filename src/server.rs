@@ -224,11 +224,14 @@ impl Server {
                 None
             }
             Command::Type => Some(self.handle_type(args).await?),
+            Command::Unsubscribe => {
+                self.handle_unsubscribe(args).await?;
+                None
+            }
             Command::Wait => Some(self.handle_wait(args).await?),
             Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
-            _ => bail!("Unsupported command: {command}"),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -432,6 +435,27 @@ impl Server {
             None => Value::Bulk("none".into()),
         };
         Ok(res)
+    }
+
+    // UNSUBSCRIBE [channel [channel ...]]
+    async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<()> {
+        let channels = args
+            .iter()
+            .map(|v| unpack_bulk_string(v))
+            .collect::<Result<Vec<_>>>()?;
+        self.config.pubsub.unsubscribe(&channels);
+        let subscriptions = self.subscriptions.as_mut().unwrap();
+        if channels.is_empty() {
+            subscriptions.clear();
+        } else {
+            for channel in channels {
+                subscriptions.remove(channel);
+            }
+        }
+        if subscriptions.is_empty() {
+            self.subscriptions = None;
+        }
+        Ok(())
     }
 
     // WAIT numreplicas timeout

@@ -8,7 +8,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_starter_rust::*;
+use codecrafters_redis::*;
 
 const PORT: u16 = 6379;
 const LOCALHOST: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);

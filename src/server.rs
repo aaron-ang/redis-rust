@@ -161,7 +161,7 @@ impl Server {
                 self.queued_commands = Some(Vec::new());
                 Some(Value::String("OK".into()))
             }
-            Command::Ping => Some(Value::String("PONG".into())),
+            Command::Ping => Some(self.handle_ping(args)),
             Command::PSync => {
                 if let Err(e) = self.handle_psync().await {
                     eprintln!("Error handling PSYNC: {e:?}");
@@ -259,6 +259,23 @@ impl Server {
 
         let values = self.config.store.lrange(key, start, end).await?;
         Ok(Value::Array(values.into_iter().map(Value::Bulk).collect()))
+    }
+
+    // PING [message]
+    fn handle_ping(&self, args: &[Value]) -> Value {
+        let message = args.first().and_then(|v| match v {
+            Value::Bulk(msg) => Some(msg),
+            _ => None,
+        });
+        if self.subscriptions.is_some() {
+            let pong = Value::Bulk("pong".into());
+            let msg = Value::Bulk(message.cloned().unwrap_or_default());
+            Value::Array(vec![pong, msg])
+        } else if let Some(msg) = message {
+            Value::String(msg.clone())
+        } else {
+            Value::String("PONG".to_string())
+        }
     }
 
     // PSYNC replicationid offset

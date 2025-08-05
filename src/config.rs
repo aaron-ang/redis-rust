@@ -3,7 +3,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::sync::broadcast;
 
 use crate::util::{ReplicaType, ReplicationState};
-use crate::Store;
+use crate::{PubSub, Store};
 
 const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILE: &str = "dump.rdb";
@@ -17,8 +17,9 @@ pub struct Config {
     pub role: ReplicaType,
     pub replicaof: Option<String>,
     pub store: Arc<Store>,
-    pub tx: Arc<broadcast::Sender<Value>>,
+    pub replicas: Arc<broadcast::Sender<Value>>,
     pub rep_state: Arc<ReplicationState>,
+    pub pubsub: Arc<PubSub>,
 }
 
 impl Config {
@@ -39,8 +40,9 @@ impl Config {
             store,
             role,
             replicaof,
-            tx: Arc::new(tx),
+            replicas: Arc::new(tx),
             rep_state: Arc::new(ReplicationState::new()),
+            pubsub: Arc::new(PubSub::default()),
         }
     }
 }

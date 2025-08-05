@@ -36,6 +36,7 @@ pub enum Command {
     RPush,
     Set,
     Subscribe,
+    Unsubscribe,
     Type,
     Wait,
     XAdd,
@@ -74,8 +75,12 @@ pub enum RedisError {
     XAddIdTooSmall,
     #[error("ERR The ID specified in XADD is equal or smaller than the target stream top item")]
     XAddIdInvalidSequence,
-    #[error("ERR {} without MULTI", .0)]
+    #[error("ERR {0} without MULTI")]
     CommandWithoutMulti(Command),
+    #[error(
+        "ERR Can't execute '{0}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
+    )]
+    CommandWithoutSubscribe(Command),
 }
 
 #[derive(Clone, PartialEq, Display)]
@@ -88,7 +93,7 @@ pub enum ReplicaType {
 
 pub struct ReplicationState {
     num_ack: RwLock<usize>,
-    prev_client_cmd: RwLock<Option<Command>>,
+    num_commands: RwLock<usize>,
 }
 
 impl Default for ReplicationState {
@@ -101,7 +106,7 @@ impl ReplicationState {
     pub fn new() -> Self {
         Self {
             num_ack: RwLock::new(0),
-            prev_client_cmd: RwLock::new(None),
+            num_commands: RwLock::new(0),
         }
     }
 
@@ -109,21 +114,21 @@ impl ReplicationState {
         *self.num_ack.read().await
     }
 
+    pub async fn get_num_commands(&self) -> usize {
+        *self.num_commands.read().await
+    }
+
     pub async fn incr_num_ack(&self) {
         *self.num_ack.write().await += 1;
     }
 
+    pub async fn incr_num_commands(&self) {
+        *self.num_commands.write().await += 1;
+    }
+
     pub async fn reset(&self) {
         *self.num_ack.write().await = 0;
-        *self.prev_client_cmd.write().await = None;
-    }
-
-    pub async fn get_prev_client_cmd(&self) -> Option<Command> {
-        *self.prev_client_cmd.read().await
-    }
-
-    pub async fn set_prev_client_cmd(&self, cmd: Option<Command>) {
-        *self.prev_client_cmd.write().await = cmd;
+        *self.num_commands.write().await = 0;
     }
 }
 

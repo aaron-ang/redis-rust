@@ -5,7 +5,7 @@ use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::broadcast::error::RecvError,
+    sync::broadcast::{self, error::RecvError},
     time::{sleep, timeout, Duration, Instant},
 };
 
@@ -20,8 +20,9 @@ pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJ
 
 pub struct Server {
     config: Config,
-    replication: bool,
     stream: TcpStream,
+    replication: bool,
+    subscriptions: Option<HashMap<String, broadcast::Receiver<String>>>,
     queued_commands: Option<Vec<Value>>,
 }
 
@@ -29,8 +30,9 @@ impl Server {
     pub fn new(config: Config, stream: TcpStream) -> Self {
         Server {
             config,
-            replication: false,
             stream,
+            replication: false,
+            subscriptions: None,
             queued_commands: None,
         }
     }
@@ -38,11 +40,18 @@ impl Server {
     pub async fn handle_conn(&mut self) -> Result<()> {
         let mut buf = vec![0; 1024];
 
-        while let Ok(bytes_read) = self.stream.read(&mut buf).await {
-            if bytes_read == 0 {
-                eprintln!("Client disconnected");
-                break;
-            }
+        loop {
+            let bytes_read = match self.stream.read(&mut buf).await {
+                Ok(0) => {
+                    eprintln!("Client disconnected");
+                    break;
+                }
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("Error reading from stream: {e}");
+                    break;
+                }
+            };
 
             let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read]));
             while let Ok(cmd_line) = decoder.decode() {
@@ -68,7 +77,7 @@ impl Server {
     }
 
     async fn handle_replication(&mut self, buf: &mut [u8]) -> Result<()> {
-        let mut rx = self.config.tx.subscribe();
+        let mut rx = self.config.replicas.subscribe();
         loop {
             match rx.recv().await {
                 Ok(v) => self.stream.write_all(&v.encode()).await?,
@@ -82,7 +91,6 @@ impl Server {
                 }
             }
 
-            // Collect acks
             if let Ok(bytes_read) = timeout(Duration::from_millis(100), self.stream.read(buf)).await
             {
                 let mut decoder = Decoder::new(BufReader::new(&buf[..bytes_read?]));
@@ -96,6 +104,15 @@ impl Server {
 
     pub async fn process(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
         let (command, args) = extract_command(cmd_line)?;
+
+        if self.subscriptions.is_some()
+            && !matches!(
+                command,
+                Command::Subscribe | Command::Unsubscribe | Command::Ping
+            )
+        {
+            bail!(RedisError::CommandWithoutSubscribe(command));
+        }
 
         if let Some(queued_commands) = &mut self.queued_commands {
             let response = match command {
@@ -154,22 +171,22 @@ impl Server {
             Command::ReplConf => Some(Value::String("OK".into())),
             Command::RPush => Some(handle_rpush(args, &self.config.store).await?),
             Command::Set => Some(handle_set(args, &self.config.store).await?),
-            Command::Subscribe => Some(self.handle_subscribe(args).await?),
+            Command::Subscribe => {
+                self.handle_subscribe(args).await?;
+                None
+            }
             Command::Type => Some(self.handle_type(args).await?),
             Command::Wait => Some(self.handle_wait(args).await?),
             Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
+            _ => todo!(),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
-            let _ = self.config.tx.send(cmd_line.clone());
+            let _ = self.config.replicas.send(cmd_line.clone());
+            self.config.rep_state.incr_num_commands().await;
         }
-
-        self.config
-            .rep_state
-            .set_prev_client_cmd(Some(command))
-            .await;
 
         Ok(response)
     }
@@ -260,23 +277,35 @@ impl Server {
     }
 
     // SUBSCRIBE channel [channel ...]
-    async fn handle_subscribe(&mut self, args: &[Value]) -> Result<Value> {
+    async fn handle_subscribe(&mut self, args: &[Value]) -> Result<()> {
         if args.is_empty() {
             bail!(RedisError::InvalidArgument);
         }
+
         let channels = args
             .iter()
             .map(|v| unpack_bulk_string(v))
             .collect::<Result<Vec<_>>>()?;
-        let mut responses = Vec::with_capacity(channels.len() * 3);
-        for (i, channel) in channels.iter().enumerate() {
-            responses.extend([
+
+        let subscriptions = self.subscriptions.get_or_insert_with(HashMap::new);
+
+        for channel in channels {
+            if subscriptions.contains_key(channel) {
+                continue;
+            }
+
+            let rx = self.config.pubsub.subscribe(channel);
+            subscriptions.insert(channel.to_string(), rx);
+
+            let response = Value::Array(vec![
                 Value::Bulk("subscribe".into()),
-                Value::Bulk(channel.to_string()),
-                Value::Integer(i as i64 + 1),
+                Value::String(channel.to_string()),
+                Value::Integer(subscriptions.len() as i64),
             ]);
+            self.stream.write_all(&response.encode()).await?;
         }
-        Ok(Value::Array(responses))
+
+        Ok(())
     }
 
     // TYPE key
@@ -303,39 +332,28 @@ impl Server {
         let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
         let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
-        if num_replicas == 0 {
-            return Ok(Value::Integer(self.count_active_replicas() as i64));
+        if self.config.rep_state.get_num_commands().await == 0 {
+            return Ok(Value::Integer(self.config.replicas.receiver_count() as i64));
         }
 
-        let responded = if self.config.rep_state.get_prev_client_cmd().await != Some(Command::Set) {
-            sleep(Duration::from_millis(timeout_ms)).await;
-            self.count_active_replicas()
-        } else {
-            let repl_getack = Value::Array(vec![
-                Value::Bulk("REPLCONF".into()),
-                Value::Bulk("GETACK".into()),
-                Value::Bulk("*".into()),
-            ]);
-            self.config.tx.send(repl_getack)?;
+        let repl_getack = Value::Array(vec![
+            Value::Bulk("REPLCONF".into()),
+            Value::Bulk("GETACK".into()),
+            Value::Bulk("*".into()),
+        ]);
+        self.config.replicas.send(repl_getack)?;
 
-            let end_time = Instant::now() + Duration::from_millis(timeout_ms);
-            let num_ack = loop {
-                let curr_acks = self.config.rep_state.get_num_ack().await;
-                if Instant::now() >= end_time || curr_acks >= num_replicas {
-                    break curr_acks;
-                }
-                sleep(Duration::from_millis(50)).await;
-            };
-
-            self.config.rep_state.reset().await;
-            num_ack
+        let end_time = Instant::now() + Duration::from_millis(timeout_ms);
+        let num_ack = loop {
+            let curr_acks = self.config.rep_state.get_num_ack().await;
+            if Instant::now() >= end_time || curr_acks >= num_replicas {
+                break curr_acks;
+            }
+            sleep(Duration::from_millis(50)).await;
         };
 
-        Ok(Value::Integer(responded as i64))
-    }
-
-    fn count_active_replicas(&self) -> usize {
-        self.config.tx.receiver_count()
+        self.config.rep_state.reset().await;
+        Ok(Value::Integer(num_ack as i64))
     }
 
     // XRANGE key start end

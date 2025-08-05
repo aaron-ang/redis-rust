@@ -35,6 +35,7 @@ pub enum Command {
     ReplConf,
     RPush,
     Set,
+    Subscribe,
     Type,
     Wait,
     XAdd,

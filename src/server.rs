@@ -154,6 +154,7 @@ impl Server {
             Command::ReplConf => Some(Value::String("OK".into())),
             Command::RPush => Some(handle_rpush(args, &self.config.store).await?),
             Command::Set => Some(handle_set(args, &self.config.store).await?),
+            Command::Subscribe => Some(self.handle_subscribe(args).await?),
             Command::Type => Some(self.handle_type(args).await?),
             Command::Wait => Some(self.handle_wait(args).await?),
             Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
@@ -256,6 +257,26 @@ impl Server {
         self.stream.flush().await?;
         self.replication = true;
         Ok(())
+    }
+
+    // SUBSCRIBE channel [channel ...]
+    async fn handle_subscribe(&mut self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument);
+        }
+        let channels = args
+            .iter()
+            .map(|v| unpack_bulk_string(v))
+            .collect::<Result<Vec<_>>>()?;
+        let mut responses = Vec::with_capacity(channels.len() * 3);
+        for (i, channel) in channels.iter().enumerate() {
+            responses.extend([
+                Value::Bulk("subscribe".into()),
+                Value::Bulk(channel.to_string()),
+                Value::Integer(i as i64 + 1),
+            ]);
+        }
+        Ok(Value::Array(responses))
     }
 
     // TYPE key

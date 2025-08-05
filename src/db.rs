@@ -1,6 +1,3 @@
-use anyhow::{bail, Result};
-use futures::future::select_all;
-use glob::Pattern;
 use std::{
     collections::{HashMap, VecDeque},
     fs,
@@ -8,6 +5,10 @@ use std::{
     sync::Arc,
     time::SystemTime,
 };
+
+use anyhow::{bail, Result};
+use futures::future::select_all;
+use glob::Pattern;
 use tokio::{
     sync::{mpsc, oneshot, RwLock},
     time::{self, Duration, Instant},

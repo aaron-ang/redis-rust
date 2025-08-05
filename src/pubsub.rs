@@ -2,6 +2,8 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
+
+use anyhow::Result;
 use tokio::sync::broadcast;
 
 const CHANNEL_CAPACITY: usize = 128;
@@ -20,10 +22,11 @@ impl PubSub {
             .subscribe()
     }
 
-    pub fn publish(&self, channel: &str, message: String) {
+    pub fn publish(&self, channel: &str, message: &str) -> Result<usize> {
         let channels = self.channels.read().unwrap();
-        if let Some(tx) = channels.get(channel) {
-            let _ = tx.send(message);
+        match channels.get(channel) {
+            Some(sender) => sender.send(message.to_string()).map_err(Into::into),
+            None => Ok(0),
         }
     }
 }

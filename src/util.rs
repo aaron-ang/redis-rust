@@ -1,5 +1,3 @@
-use anyhow::Result;
-use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use std::{
     collections::HashMap,
     fmt,
@@ -7,6 +5,9 @@ use std::{
     str::FromStr,
     time::{Duration, UNIX_EPOCH},
 };
+
+use anyhow::Result;
+use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use strum::{Display, EnumString};
 use thiserror::Error;
 use tokio::sync::RwLock;
@@ -17,6 +18,7 @@ use crate::db::{RecordType, RedisData, Store};
 #[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
     BLPop,
+    Command,
     Config,
     Discard,
     Echo,
@@ -31,6 +33,7 @@ pub enum Command {
     LRange,
     Multi,
     Ping,
+    Publish,
     PSync,
     ReplConf,
     RPush,
@@ -50,11 +53,11 @@ impl Command {
             self,
             Command::BLPop
                 | Command::Incr
-                | Command::Set
-                | Command::XAdd
                 | Command::LPop
                 | Command::LPush
                 | Command::RPush
+                | Command::Set
+                | Command::XAdd
         )
     }
 }

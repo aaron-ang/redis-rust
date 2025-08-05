@@ -1,7 +1,8 @@
+use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
+
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
-use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -145,6 +146,7 @@ impl Server {
 
         let response = match command {
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
+            Command::Command => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
@@ -162,6 +164,7 @@ impl Server {
                 Some(Value::String("OK".into()))
             }
             Command::Ping => Some(self.handle_ping(args)),
+            Command::Publish => Some(self.handle_publish(args).await?),
             Command::PSync => {
                 if let Err(e) = self.handle_psync().await {
                     eprintln!("Error handling PSYNC: {e:?}");
@@ -180,7 +183,7 @@ impl Server {
             Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
-            _ => todo!(),
+            _ => bail!("Unsupported command: {command}"),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -276,6 +279,17 @@ impl Server {
         } else {
             Value::String("PONG".to_string())
         }
+    }
+
+    // PUBLISH channel message
+    async fn handle_publish(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 2 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let channel = unpack_bulk_string(&args[0])?;
+        let message = unpack_bulk_string(&args[1])?;
+        let subscribed = self.config.pubsub.publish(channel, message)?;
+        Ok(Value::Integer(subscribed as i64))
     }
 
     // PSYNC replicationid offset

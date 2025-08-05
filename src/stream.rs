@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap},
@@ -6,6 +5,8 @@ use std::{
     str::FromStr,
     time::SystemTime,
 };
+
+use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::util::RedisError;
@@ -102,7 +103,8 @@ impl StreamRecord {
                 Ok(StreamEntryId::new(ts_ms, 0))
             }
         } else {
-            entry_id.parse()}
+            entry_id.parse()
+        }
     }
 
     fn validate_entry_id(&mut self, entry_id: StreamEntryId) -> Result<()> {

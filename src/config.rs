@@ -1,5 +1,6 @@
-use resp::Value;
 use std::{path::PathBuf, sync::Arc};
+
+use resp::Value;
 use tokio::sync::broadcast;
 
 use crate::util::{ReplicaType, ReplicationState};

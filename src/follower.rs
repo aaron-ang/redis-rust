@@ -1,8 +1,11 @@
+use std::{
+    io::{BufReader, ErrorKind},
+    sync::Arc,
+};
+
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
-use std::io::{BufReader, ErrorKind};
-use std::sync::Arc;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,

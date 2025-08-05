@@ -1,10 +1,11 @@
-use anyhow::{bail, Result};
-use clap::Parser;
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     sync::Arc,
 };
+
+use anyhow::{bail, Result};
+use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
 use redis_starter_rust::*;

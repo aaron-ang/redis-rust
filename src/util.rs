@@ -10,7 +10,6 @@ use anyhow::Result;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use strum::{Display, EnumString};
 use thiserror::Error;
-use tokio::sync::RwLock;
 
 use crate::db::{RecordType, RedisData, Store};
 
@@ -84,55 +83,6 @@ pub enum RedisError {
         "ERR Can't execute '{0}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
     )]
     CommandWithoutSubscribe(Command),
-}
-
-#[derive(Clone, PartialEq, Display)]
-pub enum ReplicaType {
-    #[strum(serialize = "master")]
-    Leader,
-    #[strum(serialize = "slave")]
-    Follower,
-}
-
-pub struct ReplicationState {
-    num_ack: RwLock<usize>,
-    num_commands: RwLock<usize>,
-}
-
-impl Default for ReplicationState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ReplicationState {
-    pub fn new() -> Self {
-        Self {
-            num_ack: RwLock::new(0),
-            num_commands: RwLock::new(0),
-        }
-    }
-
-    pub async fn get_num_ack(&self) -> usize {
-        *self.num_ack.read().await
-    }
-
-    pub async fn get_num_commands(&self) -> usize {
-        *self.num_commands.read().await
-    }
-
-    pub async fn incr_num_ack(&self) {
-        *self.num_ack.write().await += 1;
-    }
-
-    pub async fn incr_num_commands(&self) {
-        *self.num_commands.write().await += 1;
-    }
-
-    pub async fn reset(&self) {
-        *self.num_ack.write().await = 0;
-        *self.num_commands.write().await = 0;
-    }
 }
 
 pub struct Instance {

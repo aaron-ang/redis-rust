@@ -6,15 +6,16 @@ use resp::{Decoder, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::{broadcast::error::RecvError, mpsc},
+    sync::mpsc,
     task::JoinHandle,
     time::{sleep, timeout, Duration, Instant},
 };
 
 use crate::config::Config;
 use crate::db::{RecordType, Store};
+use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
-use crate::util::{Command, RedisError, ReplicaType, XReadBlockType};
+use crate::util::{Command, RedisError, XReadBlockType};
 
 enum ClientMode {
     Normal,
@@ -27,7 +28,7 @@ enum ClientMode {
     },
 }
 
-struct Connection {
+pub struct Connection {
     stream: TcpStream,
     buffer: Vec<u8>,
 }
@@ -50,7 +51,7 @@ impl Connection {
         Ok(Some(value))
     }
 
-    async fn read_value_with_timeout(&mut self, duration: Duration) -> Result<Option<Value>> {
+    pub async fn read_value_with_timeout(&mut self, duration: Duration) -> Result<Option<Value>> {
         match timeout(duration, self.read_value()).await {
             Err(_) => Ok(None), // Timeout
             Ok(Ok(value)) => Ok(value),
@@ -63,7 +64,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn write_value(&mut self, value: &Value) -> Result<()> {
+    pub async fn write_value(&mut self, value: &Value) -> Result<()> {
         self.stream.write_all(&value.encode()).await?;
         Ok(())
     }
@@ -81,7 +82,6 @@ pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJ
 pub struct Server {
     config: Config,
     conn: Connection,
-    replication: bool,
     mode: ClientMode,
 }
 
@@ -90,7 +90,6 @@ impl Server {
         Server {
             config,
             conn: Connection::new(stream),
-            replication: false,
             mode: ClientMode::Normal,
         }
     }
@@ -114,42 +113,7 @@ impl Server {
                     self.conn.write_value(&Value::Error(e.to_string())).await?;
                 }
             }
-
-            if self.replication {
-                self.handle_replication().await?;
-            }
         }
-        Ok(())
-    }
-
-    async fn handle_replication(&mut self) -> Result<()> {
-        let mut rx = self.config.replicas.subscribe();
-
-        loop {
-            match rx.recv().await {
-                Ok(msg) => {
-                    self.conn.write_value(&msg).await?;
-                }
-                Err(RecvError::Closed) => {
-                    eprintln!("Replication channel closed");
-                    break;
-                }
-                Err(RecvError::Lagged(n)) => {
-                    eprintln!("Replication lagged by {n} messages");
-                    continue;
-                }
-            }
-
-            // Check for incoming ACKs from replica
-            if let Ok(Some(_)) = self
-                .conn
-                .read_value_with_timeout(Duration::from_millis(100))
-                .await
-            {
-                self.config.rep_state.incr_num_ack().await;
-            }
-        }
-
         Ok(())
     }
 
@@ -261,8 +225,8 @@ impl Server {
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
-            let _ = self.config.replicas.send(cmd_line.clone());
-            self.config.rep_state.incr_num_commands().await;
+            self.config.replication.publish(cmd_line.clone());
+            self.config.replication.incr_num_commands();
         }
 
         Ok(response)
@@ -376,9 +340,7 @@ impl Server {
         self.conn.write_all(rdb_msg.as_bytes()).await?;
         self.conn.write_all(&rdb).await?;
         self.conn.flush().await?;
-        self.replication = true;
-
-        Ok(())
+        self.config.replication.run_replica(&mut self.conn).await
     }
 
     // SUBSCRIBE channel [channel ...]
@@ -538,8 +500,8 @@ impl Server {
         let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
         let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
 
-        if self.config.rep_state.get_num_commands().await == 0 {
-            return Ok(Value::Integer(self.config.replicas.receiver_count() as i64));
+        if self.config.replication.get_num_commands() == 0 {
+            return Ok(Value::Integer(self.config.replication.num_replicas() as i64));
         }
 
         let repl_getack = Value::Array(vec![
@@ -547,18 +509,18 @@ impl Server {
             Value::Bulk("GETACK".into()),
             Value::Bulk("*".into()),
         ]);
-        self.config.replicas.send(repl_getack)?;
+        self.config.replication.publish(repl_getack);
 
         let end_time = Instant::now() + Duration::from_millis(timeout_ms);
         let num_ack = loop {
-            let curr_acks = self.config.rep_state.get_num_ack().await;
+            let curr_acks = self.config.replication.get_num_ack();
             if Instant::now() >= end_time || curr_acks >= num_replicas {
                 break curr_acks;
             }
             sleep(Duration::from_millis(50)).await;
         };
 
-        self.config.rep_state.reset().await;
+        self.config.replication.reset();
         Ok(Value::Integer(num_ack as i64))
     }
 

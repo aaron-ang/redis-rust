@@ -1,14 +1,10 @@
 use std::{path::PathBuf, sync::Arc};
 
-use resp::Value;
-use tokio::sync::broadcast;
-
-use crate::util::{ReplicaType, ReplicationState};
+use crate::replication::{ReplicaType, ReplicationHub};
 use crate::{PubSub, Store};
 
 const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILE: &str = "dump.rdb";
-const BROADCAST_CHANNEL_SIZE: usize = 16;
 
 #[derive(Clone)]
 pub struct Config {
@@ -18,8 +14,7 @@ pub struct Config {
     pub role: ReplicaType,
     pub replicaof: Option<String>,
     pub store: Arc<Store>,
-    pub replicas: Arc<broadcast::Sender<Value>>,
-    pub rep_state: Arc<ReplicationState>,
+    pub replication: Arc<ReplicationHub>,
     pub pubsub: Arc<PubSub>,
 }
 
@@ -32,8 +27,6 @@ impl Config {
         role: ReplicaType,
         replicaof: Option<String>,
     ) -> Self {
-        let (tx, _rx) = broadcast::channel(BROADCAST_CHANNEL_SIZE);
-
         Config {
             port,
             dir: dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),
@@ -41,8 +34,7 @@ impl Config {
             store,
             role,
             replicaof,
-            replicas: Arc::new(tx),
-            rep_state: Arc::new(ReplicationState::new()),
+            replication: Arc::new(ReplicationHub::default()),
             pubsub: Arc::new(PubSub::default()),
         }
     }

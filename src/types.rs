@@ -55,6 +55,7 @@ pub enum Command {
     XRange,
     XRead,
     ZAdd,
+    ZRank,
 }
 
 impl Command {

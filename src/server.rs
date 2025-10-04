@@ -223,6 +223,7 @@ impl Server {
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
             Command::ZAdd => Some(handle_zadd(args, &self.config.store).await?),
+            Command::ZRank => Some(self.handle_zrank(args).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -446,15 +447,7 @@ impl Server {
             bail!(RedisError::InvalidArgument);
         }
         let key = unpack_bulk_string(&args[0])?;
-        let value = self.config.store.get(key).await;
-        let res = match value {
-            Some(RecordType::String(_)) => Value::Bulk("string".into()),
-            Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
-            Some(RecordType::List(_)) => Value::Bulk("list".into()),
-            Some(RecordType::SortedSet(_)) => Value::Bulk("zset".into()),
-            None => Value::Bulk("none".into()),
-        };
-        Ok(res)
+        Ok(Value::Bulk(self.config.store.type_(key).await))
     }
 
     // UNSUBSCRIBE [channel [channel ...]]
@@ -612,6 +605,19 @@ impl Server {
                 })
                 .collect();
             Ok(Value::Array(values))
+        }
+    }
+
+    // ZRANK key member
+    async fn handle_zrank(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 2 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let member = unpack_bulk_string(&args[1])?;
+        match self.config.store.zrank(key, member).await? {
+            Some(rank) => Ok(Value::Integer(rank)),
+            None => Ok(Value::Null),
         }
     }
 }

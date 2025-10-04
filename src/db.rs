@@ -18,7 +18,6 @@ use crate::sorted_set::SortedSetRecord;
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
 use crate::types::{Instance, RedisError, StringRecord, XReadBlockType};
 
-#[derive(Clone)]
 pub enum RecordType {
     String(StringRecord),
     Stream(StreamRecord),
@@ -26,7 +25,6 @@ pub enum RecordType {
     SortedSet(SortedSetRecord),
 }
 
-#[derive(Clone)]
 pub struct RedisData {
     record: RecordType,
     expiry: Option<SystemTime>,
@@ -44,9 +42,9 @@ impl RedisData {
         }
     }
 
-    fn new_sorted_set(key: &str) -> Self {
+    fn new_sorted_set() -> Self {
         RedisData {
-            record: RecordType::SortedSet(SortedSetRecord::new(key)),
+            record: RecordType::SortedSet(SortedSetRecord::new()),
             expiry: None,
         }
     }
@@ -105,12 +103,17 @@ impl Store {
     pub async fn get(&self, key: &str) -> Option<RecordType> {
         let storage = self.entries.read().await;
         let data = storage.get(key)?;
+
         if data.is_expired() {
             drop(storage);
             self.entries.write().await.remove(key);
-            None
+            return None;
+        }
+
+        if let RecordType::String(string_rec) = &data.record {
+            Some(RecordType::String(string_rec.clone()))
         } else {
-            Some(data.record.clone())
+            None
         }
     }
 
@@ -298,6 +301,20 @@ impl Store {
         Ok(matched)
     }
 
+    pub async fn type_(&self, key: &str) -> String {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return "none".into();
+        };
+        let type_ = match &data.record {
+            RecordType::String(_) => "string",
+            RecordType::Stream(_) => "stream",
+            RecordType::List(_) => "list",
+            RecordType::SortedSet(_) => "zset",
+        };
+        type_.into()
+    }
+
     pub async fn add_stream_entry(
         &self,
         key: &str,
@@ -397,10 +414,22 @@ impl Store {
         let mut storage = self.entries.write().await;
         let data = storage
             .entry(key.to_string())
-            .or_insert_with(|| RedisData::new_sorted_set(key));
+            .or_insert_with(|| RedisData::new_sorted_set());
 
         if let RecordType::SortedSet(sorted_set) = &mut data.record {
             Ok(sorted_set.add(member, score))
+        } else {
+            bail!(RedisError::WrongType);
+        }
+    }
+
+    pub async fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(None);
+        };
+        if let RecordType::SortedSet(sorted_set) = &data.record {
+            Ok(sorted_set.rank(member))
         } else {
             bail!(RedisError::WrongType);
         }

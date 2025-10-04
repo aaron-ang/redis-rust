@@ -1,25 +1,70 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
-#[derive(Clone)]
-pub struct SortedSetValue(BTreeMap<String, f64>);
+use ordered_float::OrderedFloat;
+use skiplist::OrderedSkipList;
 
-#[derive(Clone)]
+#[derive(Eq, PartialEq, Ord, PartialOrd)]
+struct Entry {
+    score: OrderedFloat<f64>,
+    member: String,
+}
+
 pub struct SortedSetRecord {
-    set_id: String,
-    value: SortedSetValue,
+    by_score: OrderedSkipList<Entry>,
+    by_member: HashMap<String, OrderedFloat<f64>>,
 }
 
 impl SortedSetRecord {
-    pub fn new(id: &str) -> Self {
+    pub fn new() -> Self {
         Self {
-            set_id: id.to_string(),
-            value: SortedSetValue(BTreeMap::new()),
+            by_score: OrderedSkipList::new(),
+            by_member: HashMap::new(),
         }
     }
 
     pub fn add(&mut self, member: &str, score: f64) -> bool {
-        let old_value = self.value.0.insert(member.to_string(), score);
-        let is_new_member = old_value.is_none();
-        is_new_member
+        let member_str = member.to_string();
+        let score_of = OrderedFloat(score);
+
+        match self.by_member.get(&member_str) {
+            Some(&old_score) if old_score == score_of => {
+                // Member exists with the same score, nothing to do
+                false
+            }
+            Some(&old_score) => {
+                // Member exists with a different score, update
+                let old_entry = Entry {
+                    score: old_score,
+                    member: member_str.clone(),
+                };
+                if let Some(idx) = self.by_score.index_of(&old_entry) {
+                    self.by_score.remove_index(idx);
+                }
+                self.by_score.insert(Entry {
+                    score: score_of,
+                    member: member_str.clone(),
+                });
+                self.by_member.insert(member_str, score_of);
+                false
+            }
+            None => {
+                // New member, insert
+                self.by_score.insert(Entry {
+                    score: score_of,
+                    member: member_str.clone(),
+                });
+                self.by_member.insert(member_str, score_of);
+                true
+            }
+        }
+    }
+
+    pub fn rank(&self, member: &str) -> Option<i64> {
+        let score = *self.by_member.get(member)?;
+        let key = Entry {
+            score,
+            member: member.to_string(),
+        };
+        self.by_score.index_of(&key).map(|i| i as i64)
     }
 }

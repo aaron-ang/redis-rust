@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::db::{RecordType, Store};
 use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
-use crate::util::{Command, RedisError, XReadBlockType};
+use crate::types::{Command, RedisError, XReadBlockType};
 
 enum ClientMode {
     Normal,
@@ -222,6 +222,7 @@ impl Server {
             Command::XAdd => Some(handle_xadd(args, &self.config.store).await?),
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
+            Command::ZAdd => Some(handle_zadd(args, &self.config.store).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -450,6 +451,7 @@ impl Server {
             Some(RecordType::String(_)) => Value::Bulk("string".into()),
             Some(RecordType::Stream(_)) => Value::Bulk("stream".into()),
             Some(RecordType::List(_)) => Value::Bulk("list".into()),
+            Some(RecordType::SortedSet(_)) => Value::Bulk("zset".into()),
             None => Value::Bulk("none".into()),
         };
         Ok(res)
@@ -593,7 +595,7 @@ impl Server {
             .await?;
 
         if entries.is_empty() {
-            Ok(Value::Null)
+            Ok(Value::NullArray)
         } else {
             // Follow same stream order as input
             let values = stream_keys
@@ -828,6 +830,25 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
     if let Some((key, value)) = elements {
         Ok(Value::Array(vec![Value::Bulk(key), Value::Bulk(value)]))
     } else {
-        Ok(Value::Null)
+        Ok(Value::NullArray)
     }
+}
+
+// ZADD key score member [score member ...]
+pub async fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let mut added = 0;
+
+    for i in (1..args.len()).step_by(2) {
+        let score = unpack_bulk_string(&args[i])?.parse::<f64>()?;
+        let member = unpack_bulk_string(&args[i + 1])?;
+        if store.zadd(key, member, score).await? {
+            added += 1;
+        }
+    }
+
+    Ok(Value::Integer(added))
 }

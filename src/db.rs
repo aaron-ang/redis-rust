@@ -14,15 +14,16 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 
+use crate::sorted_set::SortedSetRecord;
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
-use crate::util::XReadBlockType;
-use crate::util::{Instance, RedisError, StringRecord};
+use crate::types::{Instance, RedisError, StringRecord, XReadBlockType};
 
 #[derive(Clone)]
 pub enum RecordType {
     String(StringRecord),
     Stream(StreamRecord),
     List(VecDeque<String>),
+    SortedSet(SortedSetRecord),
 }
 
 #[derive(Clone)]
@@ -36,9 +37,16 @@ impl RedisData {
         RedisData { record, expiry }
     }
 
-    fn new_stream(key: String) -> Self {
+    fn new_stream(key: &str) -> Self {
         RedisData {
             record: RecordType::Stream(StreamRecord::new(key)),
+            expiry: None,
+        }
+    }
+
+    fn new_sorted_set(key: &str) -> Self {
+        RedisData {
+            record: RecordType::SortedSet(SortedSetRecord::new(key)),
             expiry: None,
         }
     }
@@ -299,10 +307,10 @@ impl Store {
         let mut storage = self.entries.write().await;
         let stream_data = storage
             .entry(key.to_string())
-            .or_insert_with(|| RedisData::new_stream(key.to_string()));
+            .or_insert_with(|| RedisData::new_stream(key));
 
         if stream_data.is_expired() || !matches!(stream_data.record, RecordType::Stream(_)) {
-            *stream_data = RedisData::new_stream(key.to_string());
+            *stream_data = RedisData::new_stream(key);
         }
 
         if let RecordType::Stream(stream) = &mut stream_data.record {
@@ -382,6 +390,19 @@ impl Store {
                 .unwrap_or_default()),
             XReadBlockType::WaitIndefinitely => Ok(await_stream_entry.await),
             _ => unreachable!(),
+        }
+    }
+
+    pub async fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
+        let mut storage = self.entries.write().await;
+        let data = storage
+            .entry(key.to_string())
+            .or_insert_with(|| RedisData::new_sorted_set(key));
+
+        if let RecordType::SortedSet(sorted_set) = &mut data.record {
+            Ok(sorted_set.add(member, score))
+        } else {
+            bail!(RedisError::WrongType);
         }
     }
 }

@@ -13,7 +13,7 @@ use tokio::{
 
 use crate::db::Store;
 use crate::server::{self, EMPTY_RDB_B64};
-use crate::util::Command;
+use crate::types::Command;
 
 const BUFFER_SIZE: usize = 1024;
 const PSYNC_RESPONSE_LEN: usize = 56;
@@ -98,6 +98,9 @@ impl Follower {
             }
             Command::XAdd => {
                 server::handle_xadd(args, &self.store).await?;
+            }
+            Command::ZAdd => {
+                server::handle_zadd(args, &self.store).await?;
             }
             _ => eprintln!("Unknown command: {command}"),
         }

@@ -9,7 +9,7 @@ use std::{
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::util::RedisError;
+use crate::types::RedisError;
 
 #[derive(Clone)]
 pub struct StreamRecord {
@@ -20,9 +20,9 @@ pub struct StreamRecord {
 }
 
 impl StreamRecord {
-    pub fn new(id: String) -> Self {
+    pub fn new(id: &str) -> Self {
         Self {
-            stream_id: id,
+            stream_id: id.to_string(),
             value: StreamValue(BTreeMap::new()),
             last_entry_id: StreamEntryId::default(),
             listeners: HashMap::new(),

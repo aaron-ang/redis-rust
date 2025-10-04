@@ -4,8 +4,9 @@ mod follower;
 mod pubsub;
 mod replication;
 mod server;
+mod sorted_set;
 mod stream;
-mod util;
+mod types;
 
 pub use config::Config;
 pub use db::Store;

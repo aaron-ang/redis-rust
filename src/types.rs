@@ -13,6 +13,16 @@ use thiserror::Error;
 
 use crate::db::{RecordType, RedisData, Store};
 
+// ============================================================================
+// CONSTANTS
+// ============================================================================
+
+const MAGIC: &str = "REDIS";
+
+// ============================================================================
+// CORE PROTOCOL TYPES
+// ============================================================================
+
 #[derive(Debug, Clone, Copy, PartialEq, Display, EnumString)]
 #[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
@@ -44,6 +54,7 @@ pub enum Command {
     XAdd,
     XRange,
     XRead,
+    ZAdd,
 }
 
 impl Command {
@@ -57,6 +68,7 @@ impl Command {
                 | Command::RPush
                 | Command::Set
                 | Command::XAdd
+                | Command::ZAdd
         )
     }
 }
@@ -84,6 +96,73 @@ pub enum RedisError {
     )]
     CommandWithoutSubscribe(Command),
 }
+
+// ============================================================================
+// CORE DATA TYPES
+// ============================================================================
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub enum StringRecord {
+    String(String),
+    Integer(i64),
+}
+
+impl StringRecord {
+    pub fn incr(&mut self) -> Result<i64> {
+        match self {
+            StringRecord::String(s) => {
+                let mut i = s.parse::<i64>().map_err(|_| RedisError::InvalidInteger)?;
+                i += 1;
+                *s = i.to_string();
+                Ok(i)
+            }
+            StringRecord::Integer(i) => {
+                *i += 1;
+                Ok(*i)
+            }
+        }
+    }
+}
+
+impl fmt::Display for StringRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StringRecord::String(s) => write!(f, "{s}"),
+            StringRecord::Integer(i) => write!(f, "{i}"),
+        }
+    }
+}
+
+impl<T: AsRef<str>> From<T> for StringRecord {
+    fn from(value: T) -> Self {
+        StringRecord::String(value.as_ref().to_string())
+    }
+}
+
+#[derive(PartialEq)]
+pub enum XReadBlockType {
+    NoWait,
+    Wait(Duration),
+    WaitIndefinitely,
+}
+
+impl FromStr for XReadBlockType {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "0" => Ok(XReadBlockType::WaitIndefinitely),
+            s => {
+                let ms = s.parse::<u64>()?;
+                Ok(XReadBlockType::Wait(Duration::from_millis(ms)))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// FILE FORMAT TYPES (RDB PARSING)
+// ============================================================================
 
 pub struct Instance {
     _version: [u8; 4],
@@ -118,8 +197,6 @@ impl InstanceBuilder {
         }
     }
 }
-
-const MAGIC: &str = "REDIS";
 
 impl Instance {
     pub fn new<T: Read>(mut buf: T) -> Result<Self> {
@@ -235,43 +312,9 @@ enum LengthValue {
     CompressedString,
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub enum StringRecord {
-    String(String),
-    Integer(i64),
-}
-
-impl StringRecord {
-    pub fn incr(&mut self) -> Result<i64> {
-        match self {
-            StringRecord::String(s) => {
-                let mut i = s.parse::<i64>().map_err(|_| RedisError::InvalidInteger)?;
-                i += 1;
-                *s = i.to_string();
-                Ok(i)
-            }
-            StringRecord::Integer(i) => {
-                *i += 1;
-                Ok(*i)
-            }
-        }
-    }
-}
-
-impl fmt::Display for StringRecord {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            StringRecord::String(s) => write!(f, "{s}"),
-            StringRecord::Integer(i) => write!(f, "{i}"),
-        }
-    }
-}
-
-impl<T: AsRef<str>> From<T> for StringRecord {
-    fn from(value: T) -> Self {
-        StringRecord::String(value.as_ref().to_string())
-    }
-}
+// ============================================================================
+// HELPER FUNCTIONS
+// ============================================================================
 
 fn read_string<T: Read>(buf: &mut T) -> Result<StringRecord> {
     match read_length(buf)? {
@@ -326,26 +369,5 @@ fn read_numeric_length<T: Read>(buf: &mut T) -> Result<usize> {
     match read_length(buf)? {
         LengthValue::Length(length) => Ok(length),
         _ => anyhow::bail!("Expected a numeric length, received special length"),
-    }
-}
-
-#[derive(PartialEq)]
-pub enum XReadBlockType {
-    NoWait,
-    Wait(Duration),
-    WaitIndefinitely,
-}
-
-impl FromStr for XReadBlockType {
-    type Err = anyhow::Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        match s {
-            "0" => Ok(XReadBlockType::WaitIndefinitely),
-            s => {
-                let ms = s.parse::<u64>()?;
-                Ok(XReadBlockType::Wait(Duration::from_millis(ms)))
-            }
-        }
     }
 }

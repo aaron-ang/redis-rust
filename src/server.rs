@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::db::{RecordType, Store};
 use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
-use crate::types::{Command, RedisError, XReadBlockType};
+use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
 
 enum ClientMode {
     Normal,
@@ -645,12 +645,16 @@ fn build_stream_entry_list(entries: StreamValue) -> Vec<Value> {
 }
 
 pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
-    if let Value::Array(args) = value {
-        let command_str = unpack_bulk_string(&args[0])?;
-        let command = Command::from_str(command_str)?;
-        Ok((command, &args[1..]))
-    } else {
+    let Value::Array(args) = value else {
         bail!("Expected array value")
+    };
+    let command_str = unpack_bulk_string(&args[0])?;
+    match Command::from_str(command_str) {
+        Ok(command) => Ok((command, &args[1..])),
+        Err(_) => bail!(RedisError::UnknownCommand(
+            command_str.to_string(),
+            QuotedArgs(args[1..].to_vec())
+        )),
     }
 }
 

@@ -8,6 +8,7 @@ use std::{
 
 use anyhow::Result;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
+use resp::Value;
 use strum::{Display, EnumString};
 use thiserror::Error;
 
@@ -74,8 +75,25 @@ impl Command {
     }
 }
 
+#[derive(Debug)]
+pub struct QuotedArgs(pub Vec<Value>);
+
+impl fmt::Display for QuotedArgs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let formatted: String = self
+            .0
+            .iter()
+            .map(|s| format!("'{}'", s.to_encoded_string().unwrap()))
+            .collect::<Vec<_>>()
+            .join(" ");
+        write!(f, "{}", formatted)
+    }
+}
+
 #[derive(Error, Debug)]
 pub enum RedisError {
+    #[error("ERR unknown command '{0}', with args beginning with: {1}")]
+    UnknownCommand(String, QuotedArgs),
     #[error("ERR wrong number of arguments for command")]
     InvalidArgument,
     #[error("ERR value is not an integer or out of range")]

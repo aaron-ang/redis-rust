@@ -254,19 +254,24 @@ impl Server {
         let res = match cmd {
             Command::Get => {
                 let name = unpack_bulk_string(&args[1])?;
-                let value = match name.to_lowercase().as_str() {
-                    "dir" => Value::Bulk(
-                        self.config
-                            .dir
-                            .clone()
-                            .into_os_string()
-                            .into_string()
-                            .unwrap_or_default(),
-                    ),
-                    "dbfilename" => Value::Bulk(self.config.dbfilename.clone()),
-                    option => bail!("Unsupported CONFIG option: {}", option),
-                };
-                Value::Array(vec![Value::Bulk(name.to_string()), value])
+                match name.to_lowercase().as_str() {
+                    "dir" => {
+                        let value = Value::Bulk(
+                            self.config
+                                .dir
+                                .clone()
+                                .into_os_string()
+                                .into_string()
+                                .unwrap_or_default(),
+                        );
+                        Value::Array(vec![Value::Bulk(name.to_string()), value])
+                    }
+                    "dbfilename" => {
+                        let value = Value::Bulk(self.config.dbfilename.clone());
+                        Value::Array(vec![Value::Bulk(name.to_string()), value])
+                    }
+                    _ => Value::Array(vec![]),
+                }
             }
             cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
         };

@@ -95,10 +95,10 @@ impl fmt::Display for QuotedArgs {
         let formatted: String = self
             .0
             .iter()
-            .map(|s| format!("'{}'", s))
+            .map(|s| format!("'{s}'"))
             .collect::<Vec<_>>()
             .join(" ");
-        write!(f, "{}", formatted)
+        write!(f, "{formatted}")
     }
 }
 
@@ -106,6 +106,8 @@ impl fmt::Display for QuotedArgs {
 pub enum RedisError {
     #[error("ERR unknown command '{0}', with args beginning with: {1}")]
     UnknownCommand(String, QuotedArgs),
+    #[error("ERR syntax error")]
+    SyntaxError,
     #[error("ERR wrong number of arguments for command")]
     InvalidArgument,
     #[error("ERR value is not an integer or out of range")]
@@ -301,7 +303,7 @@ impl Instance {
             0 => None,
             0xFC => Some(UNIX_EPOCH + Duration::from_millis(buf.read_u64::<LittleEndian>()?)),
             0xFD => Some(UNIX_EPOCH + Duration::from_secs(buf.read_u32::<LittleEndian>()? as u64)),
-            flag => anyhow::bail!("Invalid value flag: {}", flag),
+            flag => anyhow::bail!("Invalid value flag: {flag}"),
         };
 
         if expires_on.is_some() {
@@ -392,7 +394,7 @@ fn read_length<T: Read>(buf: &mut T) -> Result<LengthValue> {
             1 => Ok(LengthValue::IntegerAsString16),
             2 => Ok(LengthValue::IntegerAsString32),
             3 => Ok(LengthValue::CompressedString),
-            _ => anyhow::bail!("Invalid length type: {}", remaining_six_bits),
+            _ => anyhow::bail!("Invalid length type: {remaining_six_bits}"),
         },
         _ => unreachable!(),
     }

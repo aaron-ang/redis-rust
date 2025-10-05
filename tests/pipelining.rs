@@ -155,7 +155,7 @@ async fn test_pipelining_preserves_order() {
 #[tokio::test]
 async fn test_partial_command_buffering() {
     let (port, _handle) = setup_test_server().await;
-    let mut stream = TcpStream::connect(format!("127.0.0.1:{}", port))
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
         .await
         .unwrap();
 

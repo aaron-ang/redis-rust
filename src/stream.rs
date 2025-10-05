@@ -42,18 +42,19 @@ impl StreamRecord {
         self.validate_entry_id(entry_id)?;
         self.value.0.insert(entry_id, values.clone());
 
+        // Notify listeners whose expected_id is less than or equal to the new entry_id
+        let message = (
+            self.stream_id.clone(),
+            StreamValue(BTreeMap::from([(entry_id, values.clone())])),
+        );
         self.listeners.retain(|expected_id, senders| {
-            if entry_id >= *expected_id {
-                let message = (
-                    self.stream_id.clone(),
-                    StreamValue([(entry_id, values.clone())].into()),
-                );
+            if *expected_id <= entry_id {
                 for tx in senders {
                     let _ = tx.try_send(message.clone());
                 }
-                false
+                false // Remove this listener after notification
             } else {
-                true
+                true // Keep this listener
             }
         });
 
@@ -78,12 +79,13 @@ impl StreamRecord {
 
     fn generate_entry_id(&self, entry_id: &str) -> Result<StreamEntryId> {
         if entry_id == "*" {
-            let ts_ms = SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)?
-                .as_millis();
+            let now = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH)?;
+            let mut ts_ms = now.as_millis();
             let seq_num = match ts_ms.cmp(&self.last_entry_id.ts_ms) {
-                Ordering::Less => todo!(),
-                Ordering::Equal => self.last_entry_id.seq_no + 1,
+                Ordering::Less | Ordering::Equal => {
+                    ts_ms = self.last_entry_id.ts_ms;
+                    self.last_entry_id.seq_no + 1
+                }
                 Ordering::Greater => 0,
             };
             return Ok(StreamEntryId::new(ts_ms, seq_num));
@@ -96,9 +98,7 @@ impl StreamRecord {
         if seq_no_str == "*" {
             let ts_ms = ts_str.parse::<u128>()?;
             match ts_ms.cmp(&self.last_entry_id.ts_ms) {
-                Ordering::Less => {
-                    anyhow::bail!(RedisError::XAddIdInvalidSequence);
-                }
+                Ordering::Less => anyhow::bail!(RedisError::XAddIdInvalidSequence),
                 Ordering::Equal => Ok(StreamEntryId::new(ts_ms, self.last_entry_id.seq_no + 1)),
                 Ordering::Greater => Ok(StreamEntryId::new(ts_ms, 0)),
             }
@@ -138,7 +138,7 @@ impl StreamValue {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
 pub struct StreamEntryId {
     ts_ms: u128,
     seq_no: u64,
@@ -179,21 +179,6 @@ impl StreamEntryId {
     };
 }
 
-impl PartialOrd for StreamEntryId {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Ord for StreamEntryId {
-    fn cmp(&self, other: &Self) -> Ordering {
-        match self.ts_ms.cmp(&other.ts_ms) {
-            Ordering::Equal => self.seq_no.cmp(&other.seq_no),
-            ord => ord,
-        }
-    }
-}
-
 impl fmt::Display for StreamEntryId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.ts_ms, self.seq_no)
@@ -215,12 +200,6 @@ impl FromStr for StreamEntryId {
     }
 }
 
-impl Default for StreamEntryId {
-    fn default() -> Self {
-        Self::new(0, 0)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,11 +207,11 @@ mod tests {
     #[test]
     fn test_stream_entry_id_ordering() {
         let id1 = StreamEntryId {
-            ts_ms: 100,
+            ts_ms: 200,
             seq_no: 1,
         };
         let id2 = StreamEntryId {
-            ts_ms: 200,
+            ts_ms: 100,
             seq_no: 1,
         };
         let id3 = StreamEntryId {
@@ -244,19 +223,8 @@ mod tests {
             seq_no: 1,
         };
 
-        assert!(id3 < id1);
-        assert!(id3 < id2);
-        assert!(id4 < id1);
-        assert!(id4 < id2);
-        assert!(id4 < id1);
-
-        let mut map: BTreeMap<StreamEntryId, String> = BTreeMap::new();
-        map.insert(id3, "id3".to_string());
-        map.insert(id1, "id1".to_string());
-        map.insert(id2, "id2".to_string());
-        map.insert(id4, "id4".to_string());
-
-        let keys: Vec<StreamEntryId> = map.keys().cloned().collect();
-        assert_eq!(keys, vec![id4, id3, id1, id2]);
+        let mut ids = vec![id3, id1, id2, id4];
+        ids.sort();
+        assert_eq!(ids, vec![id4, id3, id2, id1]);
     }
 }

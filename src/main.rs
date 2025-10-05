@@ -99,7 +99,7 @@ fn parse_replica_string(replicaof: &str) -> Result<(String, u16)> {
     match (parts.next(), parts.next()) {
         (Some(host), Some(port_str)) => port_str
             .parse::<u16>()
-            .map_err(|e| anyhow::anyhow!("Invalid port: {}", e))
+            .map_err(|e| anyhow::anyhow!("Invalid port. {e}"))
             .map(|port| (host.to_string(), port)),
         _ => bail!("Invalid replicaof format"),
     }

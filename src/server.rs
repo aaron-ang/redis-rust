@@ -321,7 +321,7 @@ impl Server {
                     _ => Value::Array(vec![]),
                 }
             }
-            cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
+            cmd => bail!("Unsupported CONFIG subcommand: {cmd}"),
         };
         Ok(res)
     }
@@ -631,11 +631,11 @@ impl Server {
                     if let Some(Value::Bulk(ms)) = args_iter.next() {
                         block_option = ms.parse()?;
                     } else {
-                        bail!(RedisError::InvalidArgument);
+                        bail!(RedisError::SyntaxError)
                     }
                 }
                 Some(Value::Bulk(b)) if b.to_lowercase() == "streams" => break,
-                _ => bail!(RedisError::InvalidArgument),
+                _ => bail!(RedisError::SyntaxError),
             }
         }
 
@@ -794,7 +794,7 @@ impl Server {
             "KM" => radius * 1000.0,
             "MI" => radius * 1609.344,
             "FT" => radius * 0.3048,
-            _ => bail!(RedisError::InvalidArgument),
+            _ => bail!(RedisError::SyntaxError),
         };
 
         let results = self
@@ -810,19 +810,18 @@ fn build_stream_entry_list(entries: StreamValue) -> Vec<Value> {
     entries
         .iter()
         .map(|(id, fields)| {
+            let field_values = fields
+                .iter()
+                .flat_map(|(field, value)| {
+                    vec![
+                        Value::Bulk(field.to_string()),
+                        Value::Bulk(value.to_string()),
+                    ]
+                })
+                .collect();
             Value::Array(vec![
                 Value::Bulk(id.to_string()),
-                Value::Array(
-                    fields
-                        .iter()
-                        .flat_map(|(field, value)| {
-                            vec![
-                                Value::Bulk(field.to_string()),
-                                Value::Bulk(value.to_string()),
-                            ]
-                        })
-                        .collect(),
-                ),
+                Value::Array(field_values),
             ])
         })
         .collect()
@@ -835,15 +834,18 @@ pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
     let command_str = unpack_bulk_string(&args[0])?;
     match Command::from_str(command_str) {
         Ok(command) => Ok((command, &args[1..])),
-        Err(_) => bail!(RedisError::UnknownCommand(
-            command_str.to_string(),
-            QuotedArgs(
+        Err(_) => {
+            let arg_str_vec = QuotedArgs(
                 args[1..]
                     .iter()
-                    .map(|v| v.to_encoded_string().unwrap())
-                    .collect::<Vec<_>>()
-            )
-        )),
+                    .filter_map(|v| v.to_encoded_string().ok())
+                    .collect::<Vec<_>>(),
+            );
+            bail!(RedisError::UnknownCommand(
+                command_str.to_string(),
+                arg_str_vec
+            ))
+        }
     }
 }
 
@@ -872,22 +874,20 @@ pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
 
     let key = unpack_bulk_string(&args[0])?;
     let value = unpack_bulk_string(&args[1])?;
-    let expiry = if let Some(Value::Bulk(option)) = args.get(2) {
-        match option.to_lowercase().as_str() {
-            "px" => {
-                let ms = match args.get(3) {
-                    Some(Value::Bulk(arg)) => match arg.parse::<u64>() {
-                        Ok(ms) => ms,
-                        Err(_) => bail!(RedisError::InvalidInteger),
-                    },
-                    _ => bail!(RedisError::InvalidArgument),
-                };
-                Some(SystemTime::now() + Duration::from_millis(ms))
-            }
-            option => bail!("Unsupported SET option: {}", option),
+
+    let expiry = match args.get(2) {
+        Some(Value::Bulk(option)) if option.eq_ignore_ascii_case("px") => {
+            let ms = match args.get(3) {
+                Some(Value::Bulk(arg)) => {
+                    arg.parse::<u64>().map_err(|_| RedisError::InvalidInteger)?
+                }
+                _ => bail!(RedisError::SyntaxError),
+            };
+            Some(SystemTime::now() + Duration::from_millis(ms))
         }
-    } else {
-        None
+        Some(Value::Bulk(_)) => bail!(RedisError::SyntaxError),
+        Some(_) => bail!(RedisError::SyntaxError),
+        None => None,
     };
 
     store.set(key.to_string(), value.into(), expiry);
@@ -981,7 +981,7 @@ pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
                 }
                 Some(*c as usize)
             }
-            _ => bail!(RedisError::InvalidArgument),
+            _ => bail!(RedisError::SyntaxError),
         }
     } else {
         None
@@ -1020,7 +1020,7 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
 
     let timeout = match args.last() {
         Some(Value::Bulk(t)) => t.parse::<f64>()?,
-        _ => bail!(RedisError::InvalidArgument),
+        _ => bail!(RedisError::SyntaxError),
     };
     let keys = args[..args.len() - 1]
         .iter()

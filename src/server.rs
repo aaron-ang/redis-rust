@@ -174,7 +174,7 @@ impl Server {
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
             Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
-
+            Command::DbSize => Some(self.handle_db_size()?),
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
             Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
@@ -277,6 +277,11 @@ impl Server {
             cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
         };
         Ok(res)
+    }
+
+    // DBSIZE
+    fn handle_db_size(&self) -> Result<Value> {
+        Ok(Value::Integer(self.config.store.db_size() as i64))
     }
 
     // FLUSHALL

@@ -102,6 +102,10 @@ impl Store {
         }
     }
 
+    pub fn db_size(&self) -> usize {
+        self.entries.len()
+    }
+
     pub fn flushall(&self) {
         self.entries.clear();
     }

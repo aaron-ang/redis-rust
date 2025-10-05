@@ -30,6 +30,7 @@ pub enum Command {
     #[strum(serialize = "COMMAND")]
     Cmd,
     Config,
+    DbSize,
     Discard,
     Echo,
     Exec,

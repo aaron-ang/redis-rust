@@ -22,6 +22,10 @@ impl SortedSetRecord {
         }
     }
 
+    pub fn len(&self) -> i64 {
+        self.by_score.len() as i64
+    }
+
     pub fn add(&mut self, member: &str, score: f64) -> bool {
         let member_str = member.to_string();
         let score_of = OrderedFloat(score);

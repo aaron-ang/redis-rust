@@ -56,6 +56,7 @@ pub enum Command {
     XRange,
     XRead,
     ZAdd,
+    ZCard,
     ZRange,
     ZRank,
 }

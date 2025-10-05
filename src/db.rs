@@ -423,6 +423,18 @@ impl Store {
         }
     }
 
+    pub async fn zcard(&self, key: &str) -> Result<i64> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(0);
+        };
+        if let RecordType::SortedSet(sorted_set) = &data.record {
+            Ok(sorted_set.len())
+        } else {
+            bail!(RedisError::WrongType);
+        }
+    }
+
     pub async fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let storage = self.entries.read().await;
         let Some(data) = storage.get(key) else {

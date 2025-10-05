@@ -223,6 +223,7 @@ impl Server {
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
             Command::ZAdd => Some(handle_zadd(args, &self.config.store).await?),
+            Command::ZCard => Some(self.handle_zcard(args).await?),
             Command::ZRange => Some(self.handle_zrange(args).await?),
             Command::ZRank => Some(self.handle_zrank(args).await?),
         };
@@ -607,6 +608,15 @@ impl Server {
                 .collect();
             Ok(Value::Array(values))
         }
+    }
+
+    // ZCARD key
+    async fn handle_zcard(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 1 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        Ok(Value::Integer(self.config.store.zcard(key).await?))
     }
 
     // ZRANGE key start stop

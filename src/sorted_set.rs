@@ -42,9 +42,7 @@ impl SortedSetRecord {
                     score: old_score,
                     member: member_str.clone(),
                 };
-                if let Some(idx) = self.by_score.index_of(&old_entry) {
-                    self.by_score.remove_index(idx);
-                }
+                self.by_score.remove(&old_entry);
                 self.by_score.insert(Entry {
                     score: score_of,
                     member: member_str.clone(),
@@ -81,24 +79,18 @@ impl SortedSetRecord {
     pub fn range(&self, start: i64, end: i64) -> Vec<String> {
         let len = self.by_score.len();
 
-        let norm = |mut idx: i64| {
-            if idx < 0 {
-                idx += len as i64;
-                idx = idx.max(0);
-            }
-            idx as usize
-        };
+        if len == 0 {
+            return Vec::new();
+        }
 
-        let start = norm(start);
-        let mut end = norm(end);
+        let start = Self::normalize(start, len);
+        let mut end = Self::normalize(end, len);
 
         if start >= len {
             return Vec::new();
         }
 
-        if end >= len {
-            end = len - 1;
-        }
+        end = end.min(len - 1);
 
         if start > end {
             return Vec::new();
@@ -108,6 +100,14 @@ impl SortedSetRecord {
             .index_range(start..end + 1)
             .map(|e| e.member.clone())
             .collect()
+    }
+
+    fn normalize(idx: i64, len: usize) -> usize {
+        if idx < 0 {
+            (idx + len as i64).max(0) as usize
+        } else {
+            idx as usize
+        }
     }
 
     pub fn rank(&self, member: &str) -> Option<i64> {

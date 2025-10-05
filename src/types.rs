@@ -33,6 +33,7 @@ pub enum Command {
     Echo,
     Exec,
     GeoAdd,
+    GeoDist,
     GeoPos,
     Get,
     Incr,

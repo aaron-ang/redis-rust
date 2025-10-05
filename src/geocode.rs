@@ -7,6 +7,10 @@ const MAX_LONGITUDE: f64 = 180.0;
 const LATITUDE_RANGE: f64 = MAX_LATITUDE - MIN_LATITUDE;
 const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
 
+// Earth's quadratic mean radius for WGS-84 in meters
+const EARTH_RADIUS_IN_METERS: f64 = 6372797.560856;
+const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
+
 /// Validates that the given latitude and longitude are within the valid ranges
 /// for EPSG:3857 (Web Mercator projection) as used by Redis.
 ///
@@ -14,10 +18,40 @@ const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
 /// Valid latitudes: -85.05112878° to +85.05112878° (inclusive)
 ///
 pub fn is_valid_coordinate(latitude: f64, longitude: f64) -> bool {
-    latitude >= MIN_LATITUDE
-        && latitude <= MAX_LATITUDE
-        && longitude >= MIN_LONGITUDE
-        && longitude <= MAX_LONGITUDE
+    (MIN_LATITUDE..=MAX_LATITUDE).contains(&latitude)
+        && (MIN_LONGITUDE..=MAX_LONGITUDE).contains(&longitude)
+}
+
+fn deg_rad(ang: f64) -> f64 {
+    ang * DEG_TO_RAD
+}
+
+/// Calculate distance using simplified haversine great circle distance formula.
+/// Given longitude diff is 0 the asin(sqrt(a)) on the haversine is asin(sin(abs(u))).
+/// arcsin(sin(x)) equal to x when x ∈[−π/2,π/2]. Given latitude is between [−π/2,π/2]
+/// we can simplify arcsin(sin(x)) to x.
+fn get_lat_distance(lat1d: f64, lat2d: f64) -> f64 {
+    EARTH_RADIUS_IN_METERS * (deg_rad(lat2d) - deg_rad(lat1d)).abs()
+}
+
+/// Calculate distance using haversine great circle distance formula.
+/// This is the main distance calculation function used by Redis GEODIST.
+pub fn get_distance(lon1d: f64, lat1d: f64, lon2d: f64, lat2d: f64) -> f64 {
+    let lon1r = deg_rad(lon1d);
+    let lon2r = deg_rad(lon2d);
+    let v = ((lon2r - lon1r) / 2.0).sin();
+
+    // If v == 0 we can avoid doing expensive math when lons are practically the same
+    if v == 0.0 {
+        return get_lat_distance(lat1d, lat2d);
+    }
+
+    let lat1r = deg_rad(lat1d);
+    let lat2r = deg_rad(lat2d);
+    let u = ((lat2r - lat1r) / 2.0).sin();
+    let a = u * u + lat1r.cos() * lat2r.cos() * v * v;
+
+    2.0 * EARTH_RADIUS_IN_METERS * a.sqrt().asin()
 }
 
 pub fn encode(latitude: f64, longitude: f64) -> u64 {
@@ -130,5 +164,26 @@ mod tests {
 
         // Test both invalid
         assert!(!is_valid_coordinate(90.0, 200.0));
+    }
+
+    #[test]
+    fn test_distance_calculation() {
+        // Test distance between two points (New York to London)
+        let ny_lat = 40.7128;
+        let ny_lon = -74.0060;
+        let london_lat = 51.5074;
+        let london_lon = -0.1278;
+
+        let distance = get_distance(ny_lon, ny_lat, london_lon, london_lat);
+        // Expected distance is approximately 5570 km
+        assert!(distance > 5500000.0 && distance < 5600000.0);
+
+        // Test distance between same points (should be 0)
+        let same_point_distance = get_distance(ny_lon, ny_lat, ny_lon, ny_lat);
+        assert!(same_point_distance < 1.0); // Should be very close to 0
+
+        // Test latitude-only distance
+        let lat_distance = get_lat_distance(ny_lat, london_lat);
+        assert!(lat_distance > 1000000.0 && lat_distance < 2000000.0);
     }
 }

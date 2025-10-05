@@ -9,6 +9,7 @@ struct Entry {
     member: String,
 }
 
+#[derive(Default)]
 pub struct SortedSetRecord {
     by_score: OrderedSkipList<Entry>,
     by_member: HashMap<String, OrderedFloat<f64>>,

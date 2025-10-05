@@ -178,6 +178,7 @@ impl Server {
             Command::Echo => Some(handle_echo(args)?),
             Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
             Command::GeoAdd => Some(handle_geoadd(args, &self.config.store).await?),
+            Command::GeoDist => Some(self.handle_geodist(args).await?),
             Command::GeoPos => Some(self.handle_geopos(args).await?),
             Command::Get => Some(handle_get(args, &self.config.store).await?),
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
@@ -481,7 +482,7 @@ impl Server {
             }
             let response = Value::Array(vec![
                 Value::Bulk("unsubscribe".into()),
-                Value::Bulk(channel.into()),
+                Value::Bulk(channel),
                 Value::Integer(forwarders.len() as i64),
             ]);
             self.conn.write_value(&response).await?;
@@ -667,6 +668,21 @@ impl Server {
         let member = unpack_bulk_string(&args[1])?;
         match self.config.store.zscore(key, member).await? {
             Some(score) => Ok(Value::Bulk(score.to_string())),
+            None => Ok(Value::Null),
+        }
+    }
+
+    // GEODIST key member1 member2
+    async fn handle_geodist(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 3 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let member1 = unpack_bulk_string(&args[1])?;
+        let member2 = unpack_bulk_string(&args[2])?;
+        let distance = self.config.store.geodist(key, member1, member2).await?;
+        match distance {
+            Some(d) => Ok(Value::Bulk(d.to_string())),
             None => Ok(Value::Null),
         }
     }

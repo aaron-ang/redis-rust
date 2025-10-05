@@ -33,6 +33,7 @@ pub enum Command {
     Echo,
     Exec,
     GeoAdd,
+    GeoPos,
     Get,
     Incr,
     Info,
@@ -68,6 +69,7 @@ impl Command {
         matches!(
             self,
             Command::BLPop
+                | Command::GeoAdd
                 | Command::Incr
                 | Command::LPop
                 | Command::LPush

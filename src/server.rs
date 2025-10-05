@@ -178,6 +178,7 @@ impl Server {
             Command::Echo => Some(handle_echo(args)?),
             Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
             Command::GeoAdd => Some(handle_geoadd(args, &self.config.store).await?),
+            Command::GeoPos => Some(self.handle_geopos(args).await?),
             Command::Get => Some(handle_get(args, &self.config.store).await?),
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
             Command::Info => Some(self.handle_info()),
@@ -668,6 +669,33 @@ impl Server {
             Some(score) => Ok(Value::Bulk(score.to_string())),
             None => Ok(Value::Null),
         }
+    }
+
+    // GEOPOS key [member [member ...]]
+    async fn handle_geopos(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument);
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let members = args[1..]
+            .iter()
+            .map(unpack_bulk_string)
+            .collect::<Result<Vec<_>>>()?;
+        let positions = self.config.store.geopos(key, &members).await?;
+
+        let result = positions
+            .into_iter()
+            .map(|pos| match pos {
+                Some((lat, lon)) => Value::Array(vec![
+                    Value::Bulk(lon.to_string()),
+                    Value::Bulk(lat.to_string()),
+                ]),
+                None => Value::NullArray,
+            })
+            .collect();
+
+        Ok(Value::Array(result))
     }
 }
 

@@ -14,6 +14,7 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 
+use crate::geocode::decode;
 use crate::sorted_set::SortedSetRecord;
 use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
 use crate::types::{Instance, RedisError, StringRecord, XReadBlockType};
@@ -481,5 +482,25 @@ impl Store {
         } else {
             bail!(RedisError::WrongType);
         }
+    }
+
+    pub async fn geopos(&self, key: &str, members: &[&str]) -> Result<Vec<Option<(f64, f64)>>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(vec![None; members.len()]);
+        };
+        let RecordType::SortedSet(sorted_set) = &data.record else {
+            bail!(RedisError::WrongType);
+        };
+        let positions = members
+            .iter()
+            .map(|member| {
+                sorted_set.score(member).map(|score| {
+                    let (latitude, longitude) = decode(score as u64);
+                    (latitude, longitude)
+                })
+            })
+            .collect();
+        Ok(positions)
     }
 }

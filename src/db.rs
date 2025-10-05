@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::{bail, Result};
+use dashmap::DashMap;
 use futures::future::select_all;
 use glob::Pattern;
 use tokio::{
@@ -60,7 +61,7 @@ impl RedisData {
 
 #[derive(Clone)]
 pub struct Store {
-    entries: Arc<RwLock<HashMap<String, RedisData>>>,
+    entries: Arc<DashMap<String, RedisData>>,
     list_waiters: Arc<RwLock<HashMap<String, VecDeque<oneshot::Sender<()>>>>>,
 }
 
@@ -83,7 +84,7 @@ impl Store {
 
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
-            entries: Arc::new(RwLock::new(entries)),
+            entries: Arc::new(DashMap::from_iter(entries)),
             list_waiters: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -102,16 +103,15 @@ impl Store {
     }
 
     pub async fn get(&self, key: &str) -> Option<RecordType> {
-        let storage = self.entries.read().await;
-        let data = storage.get(key)?;
+        let entry = self.entries.get(key)?;
 
-        if data.is_expired() {
-            drop(storage);
-            self.entries.write().await.remove(key);
+        if entry.is_expired() {
+            drop(entry);
+            self.entries.remove(key);
             return None;
         }
 
-        let RecordType::String(string_rec) = &data.record else {
+        let RecordType::String(string_rec) = &entry.record else {
             return None;
         };
         Some(RecordType::String(string_rec.clone()))
@@ -119,17 +119,15 @@ impl Store {
 
     pub async fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
         self.entries
-            .write()
-            .await
             .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
 
     pub async fn incr(&self, key: &str) -> Result<i64> {
-        let mut storage = self.entries.write().await;
-        let data = storage
+        let mut entry = self
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| RedisData::new(RecordType::String(StringRecord::Integer(0)), None));
-        let RecordType::String(string_rec) = &mut data.record else {
+        let RecordType::String(string_rec) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
         string_rec.incr()
@@ -137,11 +135,11 @@ impl Store {
 
     pub async fn rpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
         let len = {
-            let mut storage = self.entries.write().await;
-            let data = storage
+            let mut entry = self
+                .entries
                 .entry(key.to_string())
                 .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
-            let RecordType::List(list) = &mut data.record else {
+            let RecordType::List(list) = &mut entry.record else {
                 bail!(RedisError::WrongType);
             };
             for element in elements {
@@ -162,19 +160,14 @@ impl Store {
 
         loop {
             // 1. Non-blocking check for data, respecting key order.
-            {
-                let mut storage = self.entries.write().await;
-                for &key in keys {
-                    let Some(data) = storage.get_mut(key) else {
-                        continue;
-                    };
-                    let RecordType::List(list) = &mut data.record else {
+            for &key in keys {
+                if let Some(mut entry) = self.entries.get_mut(key) {
+                    let RecordType::List(list) = &mut entry.record else {
                         bail!(RedisError::WrongType);
                     };
-                    let Some(val) = list.pop_front() else {
-                        continue;
-                    };
-                    return Ok(Some((key.to_string(), val)));
+                    if let Some(val) = list.pop_front() {
+                        return Ok(Some((key.to_string(), val)));
+                    }
                 }
             }
 
@@ -209,11 +202,10 @@ impl Store {
     }
 
     pub async fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
-        let mut storage = self.entries.write().await;
-        let Some(data) = storage.get_mut(key) else {
+        let Some(mut entry) = self.entries.get_mut(key) else {
             return Ok(Vec::new());
         };
-        let RecordType::List(list) = &mut data.record else {
+        let RecordType::List(list) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok((0..count).filter_map(|_| list.pop_front()).collect())
@@ -221,12 +213,12 @@ impl Store {
 
     pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
         let len = {
-            let mut storage = self.entries.write().await;
-            let data = storage
+            let mut entry = self
+                .entries
                 .entry(key.to_string())
                 .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
 
-            let RecordType::List(list) = &mut data.record else {
+            let RecordType::List(list) = &mut entry.record else {
                 bail!(RedisError::WrongType);
             };
             for element in elements {
@@ -239,11 +231,10 @@ impl Store {
     }
 
     pub async fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
         };
-        let RecordType::List(list) = &data.record else {
+        let RecordType::List(list) = &entry.record else {
             bail!(RedisError::WrongType);
         };
 
@@ -261,11 +252,10 @@ impl Store {
     }
 
     pub async fn llen(&self, key: &str) -> Result<i64> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
-        let RecordType::List(list) = &data.record else {
+        let RecordType::List(list) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(list.len() as i64)
@@ -276,31 +266,27 @@ impl Store {
         let mut expired = Vec::new();
         let mut matched = Vec::new();
 
-        {
-            let storage = self.entries.read().await;
-            for (key, data) in storage.iter() {
-                if data.is_expired() {
-                    expired.push(key.clone());
-                } else if pattern.matches(key) {
-                    matched.push(key.clone());
-                }
+        for entry in self.entries.iter() {
+            let (key, data) = entry.pair();
+            if data.is_expired() {
+                expired.push(key.clone());
+            } else if pattern.matches(key) {
+                matched.push(key.clone());
             }
         }
 
-        let mut storage = self.entries.write().await;
         for key in expired {
-            storage.remove(&key);
+            self.entries.remove(&key);
         }
 
         Ok(matched)
     }
 
     pub async fn type_(&self, key: &str) -> String {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return "none".into();
         };
-        let type_ = match &data.record {
+        let type_ = match &entry.record {
             RecordType::String(_) => "string",
             RecordType::Stream(_) => "stream",
             RecordType::List(_) => "list",
@@ -315,19 +301,19 @@ impl Store {
         entry_id: &str,
         values: HashMap<String, String>,
     ) -> Result<StreamEntryId> {
-        let mut storage = self.entries.write().await;
-        let stream_data = storage
+        let mut entry = self
+            .entries
             .entry(key.to_string())
             .or_insert_with(|| RedisData::new_stream(key));
 
-        if stream_data.is_expired() || !matches!(stream_data.record, RecordType::Stream(_)) {
-            *stream_data = RedisData::new_stream(key);
+        if entry.is_expired() || !matches!(entry.record, RecordType::Stream(_)) {
+            *entry = RedisData::new_stream(key);
         }
 
-        let RecordType::Stream(stream) = &mut stream_data.record else {
+        let RecordType::Stream(stream) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
-        stream.xadd(entry_id, values).await
+        return stream.xadd(entry_id, values).await;
     }
 
     pub async fn get_range_stream_entries(
@@ -339,11 +325,11 @@ impl Store {
         let start = StreamEntryId::parse_start_range(start)?;
         let end = StreamEntryId::parse_end_range(end)?;
 
-        let storage = self.entries.read().await;
-        let stream_data = storage
+        let entry = self
+            .entries
             .get(key)
             .ok_or_else(|| anyhow::anyhow!(RedisError::KeyNotFound))?;
-        let RecordType::Stream(stream) = &stream_data.record else {
+        let RecordType::Stream(stream) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(stream.xrange(start, end, false))
@@ -357,25 +343,22 @@ impl Store {
         let mut res = HashMap::new();
         let (tx, mut rx) = mpsc::channel(streams.len());
 
-        {
-            let mut storage = self.entries.write().await;
-            for &(stream_key, start_id) in streams {
-                let Some(stream_data) = storage.get_mut(stream_key) else {
-                    continue;
-                };
-                let RecordType::Stream(stream) = &mut stream_data.record else {
-                    bail!(RedisError::WrongType);
-                };
-                match start_id {
-                    "$" => stream.subscribe(stream.last_entry_id(), tx.clone()),
-                    _ => {
-                        let start = StreamEntryId::parse_start_range(start_id)?;
-                        let range_entries = stream.xrange(start, StreamEntryId::MAX, true);
-                        if range_entries.is_empty() {
-                            stream.subscribe(start, tx.clone());
-                        } else {
-                            res.insert(stream_key.to_owned(), range_entries);
-                        }
+        for &(stream_key, start_id) in streams {
+            let Some(mut entry) = self.entries.get_mut(stream_key) else {
+                continue;
+            };
+            let RecordType::Stream(stream) = &mut entry.record else {
+                bail!(RedisError::WrongType);
+            };
+            match start_id {
+                "$" => stream.subscribe(stream.last_entry_id(), tx.clone()),
+                _ => {
+                    let start = StreamEntryId::parse_start_range(start_id)?;
+                    let range_entries = stream.xrange(start, StreamEntryId::MAX, true);
+                    if range_entries.is_empty() {
+                        stream.subscribe(start, tx.clone());
+                    } else {
+                        res.insert(stream_key.to_owned(), range_entries);
                     }
                 }
             }
@@ -402,78 +385,73 @@ impl Store {
     }
 
     pub async fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
-        let mut storage = self.entries.write().await;
-        let data = storage
+        let mut entry = self
+            .entries
             .entry(key.to_string())
             .or_insert_with(RedisData::new_sorted_set);
 
-        let RecordType::SortedSet(sorted_set) = &mut data.record else {
+        let RecordType::SortedSet(sorted_set) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.add(member, score))
     }
 
     pub async fn zcard(&self, key: &str) -> Result<i64> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.len())
     }
 
     pub async fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.range(start, end))
     }
 
     pub async fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.rank(member))
     }
 
     pub async fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
-        let mut storage = self.entries.write().await;
-        let data = storage
+        let mut entry = self
+            .entries
             .entry(key.to_string())
             .or_insert_with(RedisData::new_sorted_set);
-        let RecordType::SortedSet(sorted_set) = &mut data.record else {
+        let RecordType::SortedSet(sorted_set) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.remove(members))
     }
 
     pub async fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         Ok(sorted_set.score(member))
     }
 
     pub async fn geodist(&self, key: &str, member1: &str, member2: &str) -> Result<Option<f64>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
 
@@ -492,11 +470,10 @@ impl Store {
     }
 
     pub async fn geopos(&self, key: &str, members: &[&str]) -> Result<Vec<Option<(f64, f64)>>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(vec![None; members.len()]);
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
         let positions = members
@@ -518,11 +495,10 @@ impl Store {
         from_lat: f64,
         radius_m: f64,
     ) -> Result<Vec<String>> {
-        let storage = self.entries.read().await;
-        let Some(data) = storage.get(key) else {
+        let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
         };
-        let RecordType::SortedSet(sorted_set) = &data.record else {
+        let RecordType::SortedSet(sorted_set) = &entry.record else {
             bail!(RedisError::WrongType);
         };
 

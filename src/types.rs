@@ -33,6 +33,7 @@ pub enum Command {
     Discard,
     Echo,
     Exec,
+    FlushAll,
     GeoAdd,
     GeoDist,
     GeoPos,

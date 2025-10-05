@@ -102,6 +102,10 @@ impl Store {
         }
     }
 
+    pub async fn flushall(&self) {
+        self.entries.clear();
+    }
+
     pub async fn get(&self, key: &str) -> Option<RecordType> {
         let entry = self.entries.get(key)?;
 

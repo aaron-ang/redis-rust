@@ -177,6 +177,7 @@ impl Server {
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
             Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::FlushAll => Some(self.handle_flushall().await?),
             Command::GeoAdd => Some(handle_geoadd(args, &self.config.store).await?),
             Command::GeoDist => Some(self.handle_geodist(args).await?),
             Command::GeoPos => Some(self.handle_geopos(args).await?),
@@ -270,6 +271,12 @@ impl Server {
             cmd => bail!("Unsupported CONFIG subcommand: {}", cmd),
         };
         Ok(res)
+    }
+
+    // FLUSHALL
+    async fn handle_flushall(&self) -> Result<Value> {
+        self.config.store.flushall().await;
+        Ok(Value::String("OK".into()))
     }
 
     // INFO

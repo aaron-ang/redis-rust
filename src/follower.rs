@@ -77,14 +77,14 @@ impl Follower {
                 server::handle_blpop(args, &self.store).await?;
             }
             Command::Get => {
-                server::handle_get(args, &self.store).await?;
+                server::handle_get(args, &self.store)?;
             }
             Command::Incr => {
-                server::handle_incr(args, &self.store).await?;
+                server::handle_incr(args, &self.store)?;
             }
             Command::Ping => {}
             Command::LPop => {
-                server::handle_lpop(args, &self.store).await?;
+                server::handle_lpop(args, &self.store)?;
             }
             Command::LPush => {
                 server::handle_lpush(args, &self.store).await?;
@@ -94,16 +94,16 @@ impl Follower {
                 server::handle_rpush(args, &self.store).await?;
             }
             Command::Set => {
-                server::handle_set(args, &self.store).await?;
+                server::handle_set(args, &self.store)?;
             }
             Command::XAdd => {
-                server::handle_xadd(args, &self.store).await?;
+                server::handle_xadd(args, &self.store)?;
             }
             Command::ZAdd => {
-                server::handle_zadd(args, &self.store).await?;
+                server::handle_zadd(args, &self.store)?;
             }
             Command::ZRem => {
-                server::handle_zrem(args, &self.store).await?;
+                server::handle_zrem(args, &self.store)?;
             }
             _ => eprintln!("Unknown command: {command}"),
         }

@@ -33,7 +33,7 @@ impl StreamRecord {
         self.last_entry_id
     }
 
-    pub async fn xadd(
+    pub fn xadd(
         &mut self,
         entry_id_str: &str,
         values: HashMap<String, String>,

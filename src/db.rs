@@ -102,11 +102,11 @@ impl Store {
         }
     }
 
-    pub async fn flushall(&self) {
+    pub fn flushall(&self) {
         self.entries.clear();
     }
 
-    pub async fn get(&self, key: &str) -> Option<RecordType> {
+    pub fn get(&self, key: &str) -> Option<RecordType> {
         let entry = self.entries.get(key)?;
 
         if entry.is_expired() {
@@ -121,12 +121,12 @@ impl Store {
         Some(RecordType::String(string_rec.clone()))
     }
 
-    pub async fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
+    pub fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
         self.entries
             .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
 
-    pub async fn incr(&self, key: &str) -> Result<i64> {
+    pub fn incr(&self, key: &str) -> Result<i64> {
         let mut entry = self
             .entries
             .entry(key.to_string())
@@ -205,7 +205,7 @@ impl Store {
         }
     }
 
-    pub async fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
+    pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
         let Some(mut entry) = self.entries.get_mut(key) else {
             return Ok(Vec::new());
         };
@@ -234,7 +234,7 @@ impl Store {
         Ok(len)
     }
 
-    pub async fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
+    pub fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
         };
@@ -255,7 +255,7 @@ impl Store {
             .collect())
     }
 
-    pub async fn llen(&self, key: &str) -> Result<i64> {
+    pub fn llen(&self, key: &str) -> Result<i64> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
@@ -265,7 +265,7 @@ impl Store {
         Ok(list.len() as i64)
     }
 
-    pub async fn keys(&self, pattern: &str) -> Result<Vec<String>> {
+    pub fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();
         let mut matched = Vec::new();
@@ -286,7 +286,7 @@ impl Store {
         Ok(matched)
     }
 
-    pub async fn type_(&self, key: &str) -> String {
+    pub fn type_(&self, key: &str) -> String {
         let Some(entry) = self.entries.get(key) else {
             return "none".into();
         };
@@ -299,7 +299,7 @@ impl Store {
         type_.into()
     }
 
-    pub async fn add_stream_entry(
+    pub fn add_stream_entry(
         &self,
         key: &str,
         entry_id: &str,
@@ -317,10 +317,10 @@ impl Store {
         let RecordType::Stream(stream) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
-        return stream.xadd(entry_id, values).await;
+        return stream.xadd(entry_id, values);
     }
 
-    pub async fn get_range_stream_entries(
+    pub fn get_range_stream_entries(
         &self,
         key: &str,
         start: &str,
@@ -388,7 +388,7 @@ impl Store {
         }
     }
 
-    pub async fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
+    pub fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
         let mut entry = self
             .entries
             .entry(key.to_string())
@@ -400,7 +400,7 @@ impl Store {
         Ok(sorted_set.add(member, score))
     }
 
-    pub async fn zcard(&self, key: &str) -> Result<i64> {
+    pub fn zcard(&self, key: &str) -> Result<i64> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
         };
@@ -410,7 +410,7 @@ impl Store {
         Ok(sorted_set.len())
     }
 
-    pub async fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
+    pub fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
         };
@@ -420,7 +420,7 @@ impl Store {
         Ok(sorted_set.range(start, end))
     }
 
-    pub async fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
+    pub fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
@@ -430,7 +430,7 @@ impl Store {
         Ok(sorted_set.rank(member))
     }
 
-    pub async fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
+    pub fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
         let mut entry = self
             .entries
             .entry(key.to_string())
@@ -441,7 +441,7 @@ impl Store {
         Ok(sorted_set.remove(members))
     }
 
-    pub async fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
+    pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
@@ -451,7 +451,7 @@ impl Store {
         Ok(sorted_set.score(member))
     }
 
-    pub async fn geodist(&self, key: &str, member1: &str, member2: &str) -> Result<Option<f64>> {
+    pub fn geodist(&self, key: &str, member1: &str, member2: &str) -> Result<Option<f64>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(None);
         };
@@ -473,7 +473,7 @@ impl Store {
         }
     }
 
-    pub async fn geopos(&self, key: &str, members: &[&str]) -> Result<Vec<Option<(f64, f64)>>> {
+    pub fn geopos(&self, key: &str, members: &[&str]) -> Result<Vec<Option<(f64, f64)>>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(vec![None; members.len()]);
         };
@@ -492,7 +492,7 @@ impl Store {
         Ok(positions)
     }
 
-    pub async fn geosearch(
+    pub fn geosearch(
         &self,
         key: &str,
         from_lon: f64,

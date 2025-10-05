@@ -119,6 +119,8 @@ pub enum RedisError {
         "ERR Can't execute '{0}': only (P|S)SUBSCRIBE / (P|S)UNSUBSCRIBE / PING / QUIT / RESET are allowed in this context"
     )]
     CommandWithoutSubscribe(Command),
+    #[error("ERR invalid longitude,latitude pair {0},{1}")]
+    InvalidCoordinates(f64, f64),
 }
 
 // ============================================================================

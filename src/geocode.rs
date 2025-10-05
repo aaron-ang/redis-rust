@@ -6,6 +6,13 @@ const MAX_LONGITUDE: f64 = 180.0;
 const LATITUDE_RANGE: f64 = MAX_LATITUDE - MIN_LATITUDE;
 const LONGITUDE_RANGE: f64 = MAX_LONGITUDE - MIN_LONGITUDE;
 
+pub fn is_valid_coordinate(latitude: f64, longitude: f64) -> bool {
+    latitude >= MIN_LATITUDE
+        && latitude <= MAX_LATITUDE
+        && longitude >= MIN_LONGITUDE
+        && longitude <= MAX_LONGITUDE
+}
+
 pub fn encode(latitude: f64, longitude: f64) -> u64 {
     // Normalize to the range 0-2^26
     let normalized_latitude = 2.0_f64.powi(26) * (latitude - MIN_LATITUDE) / LATITUDE_RANGE;

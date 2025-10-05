@@ -13,7 +13,7 @@ use tokio::{
 
 use crate::config::Config;
 use crate::db::{RecordType, Store};
-use crate::geocode::encode;
+use crate::geocode::{encode, is_valid_coordinate};
 use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
 use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
@@ -935,16 +935,24 @@ pub async fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
 
 // GEOADD key longitude latitude member [longitude latitude member ...]
 pub async fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 4 {
+    if args.len() < 4 || (args.len() - 1) % 3 != 0 {
         bail!(RedisError::InvalidArgument);
     }
     let key = unpack_bulk_string(&args[0])?;
-    let mut added = 0;
 
-    for i in (1..args.len()).step_by(3) {
-        let longitude = unpack_bulk_string(&args[i])?.parse::<f64>()?;
-        let latitude = unpack_bulk_string(&args[i + 1])?.parse::<f64>()?;
-        let member = unpack_bulk_string(&args[i + 2])?;
+    let mut parsed_entries = Vec::new();
+    for chunk in args[1..].chunks(3) {
+        let longitude = unpack_bulk_string(&chunk[0])?.parse::<f64>()?;
+        let latitude = unpack_bulk_string(&chunk[1])?.parse::<f64>()?;
+        let member = unpack_bulk_string(&chunk[2])?;
+        if !is_valid_coordinate(latitude, longitude) {
+            bail!(RedisError::InvalidCoordinates(longitude, latitude));
+        }
+        parsed_entries.push((longitude, latitude, member));
+    }
+
+    let mut added = 0;
+    for (longitude, latitude, member) in parsed_entries {
         let score = encode(latitude, longitude);
         if store.zadd(key, member, score as f64).await? {
             added += 1;

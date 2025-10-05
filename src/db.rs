@@ -458,4 +458,16 @@ impl Store {
             bail!(RedisError::WrongType);
         }
     }
+
+    pub async fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(None);
+        };
+        if let RecordType::SortedSet(sorted_set) = &data.record {
+            Ok(sorted_set.score(member))
+        } else {
+            bail!(RedisError::WrongType);
+        }
+    }
 }

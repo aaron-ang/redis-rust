@@ -103,6 +103,10 @@ impl SortedSetRecord {
         };
         self.by_score.index_of(&key).map(|i| i as i64)
     }
+
+    pub fn score(&self, member: &str) -> Option<f64> {
+        self.by_member.get(member).map(|s| s.into_inner())
+    }
 }
 
 #[cfg(test)]

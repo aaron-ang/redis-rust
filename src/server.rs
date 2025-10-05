@@ -226,6 +226,7 @@ impl Server {
             Command::ZCard => Some(self.handle_zcard(args).await?),
             Command::ZRange => Some(self.handle_zrange(args).await?),
             Command::ZRank => Some(self.handle_zrank(args).await?),
+            Command::ZScore => Some(self.handle_zscore(args).await?),
         };
 
         if command.is_write() && self.config.role == ReplicaType::Leader {
@@ -649,6 +650,19 @@ impl Server {
         let member = unpack_bulk_string(&args[1])?;
         match self.config.store.zrank(key, member).await? {
             Some(rank) => Ok(Value::Integer(rank)),
+            None => Ok(Value::Null),
+        }
+    }
+
+    // ZSCORE key member
+    async fn handle_zscore(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 2 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let member = unpack_bulk_string(&args[1])?;
+        match self.config.store.zscore(key, member).await? {
+            Some(score) => Ok(Value::Bulk(score.to_string())),
             None => Ok(Value::Null),
         }
     }

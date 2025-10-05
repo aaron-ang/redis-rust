@@ -59,6 +59,7 @@ pub enum Command {
     ZCard,
     ZRange,
     ZRank,
+    ZScore,
 }
 
 impl Command {

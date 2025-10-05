@@ -510,4 +510,37 @@ impl Store {
             .collect();
         Ok(positions)
     }
+
+    pub async fn geosearch(
+        &self,
+        key: &str,
+        from_lon: f64,
+        from_lat: f64,
+        radius_m: f64,
+    ) -> Result<Vec<String>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(Vec::new());
+        };
+        let RecordType::SortedSet(sorted_set) = &data.record else {
+            bail!(RedisError::WrongType);
+        };
+
+        let results = sorted_set
+            .members()
+            .filter_map(|member| {
+                sorted_set.score(member).and_then(|score| {
+                    let (lat, lon) = decode(score as u64);
+                    let distance = get_distance(from_lon, from_lat, lon, lat);
+                    if distance <= radius_m {
+                        Some(member.to_string())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        Ok(results)
+    }
 }

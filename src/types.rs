@@ -27,7 +27,8 @@ const MAGIC: &str = "REDIS";
 #[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
     BLPop,
-    Command,
+    #[strum(serialize = "COMMAND")]
+    Cmd,
     Config,
     Discard,
     Echo,
@@ -35,6 +36,7 @@ pub enum Command {
     GeoAdd,
     GeoDist,
     GeoPos,
+    GeoSearch,
     Get,
     Incr,
     Info,

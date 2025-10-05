@@ -122,6 +122,10 @@ impl SortedSetRecord {
     pub fn score(&self, member: &str) -> Option<f64> {
         self.by_member.get(member).map(|s| s.into_inner())
     }
+
+    pub fn members(&self) -> impl Iterator<Item = &str> {
+        self.by_member.keys().map(String::as_str)
+    }
 }
 
 #[cfg(test)]

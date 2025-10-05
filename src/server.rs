@@ -172,7 +172,7 @@ impl Server {
 
         let response = match command {
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
-            Command::Command => Some(Value::Array(vec![])),
+            Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
@@ -180,6 +180,7 @@ impl Server {
             Command::GeoAdd => Some(handle_geoadd(args, &self.config.store).await?),
             Command::GeoDist => Some(self.handle_geodist(args).await?),
             Command::GeoPos => Some(self.handle_geopos(args).await?),
+            Command::GeoSearch => Some(self.handle_geosearch(args).await?),
             Command::Get => Some(handle_get(args, &self.config.store).await?),
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
             Command::Info => Some(self.handle_info()),
@@ -712,6 +713,34 @@ impl Server {
             .collect();
 
         Ok(Value::Array(result))
+    }
+
+    // GEOSEARCH key <FROMLONLAT longitude latitude> <BYRADIUS radius <M | KM |FT | MI>>
+    async fn handle_geosearch(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 7 {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let from_lon = unpack_bulk_string(&args[2])?.parse::<f64>()?;
+        let from_lat = unpack_bulk_string(&args[3])?.parse::<f64>()?;
+        let radius = unpack_bulk_string(&args[5])?.parse::<f64>()?;
+        let unit = unpack_bulk_string(&args[6])?;
+
+        let radius_m = match unit.to_uppercase().as_str() {
+            "M" => radius,
+            "KM" => radius * 1000.0,
+            "MI" => radius * 1609.344,
+            "FT" => radius * 0.3048,
+            _ => bail!(RedisError::InvalidArgument),
+        };
+
+        let results = self
+            .config
+            .store
+            .geosearch(key, from_lon, from_lat, radius_m)
+            .await?;
+
+        Ok(Value::Array(results.into_iter().map(Value::Bulk).collect()))
     }
 }
 

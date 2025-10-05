@@ -59,6 +59,22 @@ impl SortedSetRecord {
         }
     }
 
+    pub fn range(&self, start: i64, mut end: i64) -> Vec<String> {
+        if start >= self.by_score.len() as i64 {
+            return Vec::new();
+        }
+        if end >= self.by_score.len() as i64 {
+            end = (self.by_score.len() as i64) - 1;
+        }
+        if start > end {
+            return Vec::new();
+        }
+        self.by_score
+            .index_range(start.max(0) as usize..(end + 1).max(0) as usize)
+            .map(|e| e.member.clone())
+            .collect()
+    }
+
     pub fn rank(&self, member: &str) -> Option<i64> {
         let score = *self.by_member.get(member)?;
         let key = Entry {

@@ -223,6 +223,7 @@ impl Server {
             Command::XRange => Some(self.handle_xrange(args).await?),
             Command::XRead => Some(self.handle_xread(args).await?),
             Command::ZAdd => Some(handle_zadd(args, &self.config.store).await?),
+            Command::ZRange => Some(self.handle_zrange(args).await?),
             Command::ZRank => Some(self.handle_zrank(args).await?),
         };
 
@@ -608,6 +609,27 @@ impl Server {
         }
     }
 
+    // ZRANGE key start stop
+    async fn handle_zrange(&self, args: &[Value]) -> Result<Value> {
+        if args.len() != 3 {
+            bail!(RedisError::InvalidArgument);
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let start = unpack_bulk_string(&args[1])?.parse::<i64>()?;
+        let stop = unpack_bulk_string(&args[2])?.parse::<i64>()?;
+
+        Ok(Value::Array(
+            self.config
+                .store
+                .zrange(key, start, stop)
+                .await?
+                .into_iter()
+                .map(Value::Bulk)
+                .collect(),
+        ))
+    }
+
     // ZRANK key member
     async fn handle_zrank(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 2 {
@@ -777,33 +799,35 @@ pub async fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
         bail!(RedisError::InvalidArgument);
     }
     let key = unpack_bulk_string(&args[0])?;
-    let count = match args.get(1) {
-        Some(Value::Bulk(c)) => {
-            let parsed = c.parse::<i64>()?;
-            if parsed < 0 {
-                bail!(RedisError::InvalidInteger);
+    let count = if let Some(arg) = args.get(1) {
+        match arg {
+            Value::Bulk(c) => {
+                let parsed = c.parse::<i64>()?;
+                if parsed < 0 {
+                    bail!(RedisError::InvalidInteger);
+                }
+                Some(parsed as usize)
             }
-            Some(parsed as usize)
-        }
-        Some(Value::Integer(c)) => {
-            if *c < 0 {
-                bail!(RedisError::InvalidInteger);
+            Value::Integer(c) => {
+                if *c < 0 {
+                    bail!(RedisError::InvalidInteger);
+                }
+                Some(*c as usize)
             }
-            Some(*c as usize)
+            _ => bail!(RedisError::InvalidArgument),
         }
-        None => None,
-        _ => bail!(RedisError::InvalidArgument),
+    } else {
+        None
     };
+
     let elements = store.lpop(key, count.unwrap_or(1)).await?;
 
-    if elements.is_empty() {
-        Ok(Value::Null)
-    } else if count.is_none() {
-        Ok(Value::Bulk(elements[0].clone()))
-    } else {
-        Ok(Value::Array(
+    match (elements.is_empty(), count) {
+        (true, _) => Ok(Value::Null),
+        (false, None) => Ok(Value::Bulk(elements[0].clone())),
+        (false, Some(_)) => Ok(Value::Array(
             elements.into_iter().map(Value::Bulk).collect(),
-        ))
+        )),
     }
 }
 

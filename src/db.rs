@@ -423,6 +423,18 @@ impl Store {
         }
     }
 
+    pub async fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
+        let storage = self.entries.read().await;
+        let Some(data) = storage.get(key) else {
+            return Ok(Vec::new());
+        };
+        if let RecordType::SortedSet(sorted_set) = &data.record {
+            Ok(sorted_set.range(start, end))
+        } else {
+            bail!(RedisError::WrongType);
+        }
+    }
+
     pub async fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
         let storage = self.entries.read().await;
         let Some(data) = storage.get(key) else {

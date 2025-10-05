@@ -321,7 +321,7 @@ impl Store {
         let RecordType::Stream(stream) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
-        return stream.xadd(entry_id, values);
+        stream.xadd(entry_id, values)
     }
 
     pub fn get_range_stream_entries(

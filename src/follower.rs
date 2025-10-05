@@ -63,8 +63,7 @@ impl Follower {
                 }
                 Err(e) => match e.kind() {
                     ErrorKind::UnexpectedEof => break,
-                    ErrorKind::InvalidInput => continue,
-                    _ => eprintln!("Error: {e:?}"),
+                    _ => eprintln!("Error decoding command: {e:?}"),
                 },
             }
         }
@@ -184,16 +183,18 @@ impl Follower {
         ]);
         self.send_command(psync).await?;
 
-        match self.read_response_with_len(PSYNC_RESPONSE_LEN).await? {
-            Value::String(res_str) => {
-                let sync: Vec<&str> = res_str.split_ascii_whitespace().collect();
-                if sync.len() < 3 || sync[0] != "FULLRESYNC" {
-                    bail!("Unexpected response to PSYNC: {}", res_str);
-                }
-                self.offset = sync[2].parse()?;
+        let response = self.read_response_with_len(PSYNC_RESPONSE_LEN).await?;
+        let Value::String(res_str) = response else {
+            bail!("Invalid PSYNC response format")
+        };
+
+        let sync: Vec<&str> = res_str.split_ascii_whitespace().collect();
+        match &sync[..] {
+            ["FULLRESYNC", _, offset] => {
+                self.offset = offset.parse()?;
                 Ok(())
             }
-            _ => bail!("Invalid PSYNC response format"),
+            _ => bail!("Unexpected response to PSYNC: {res_str}"),
         }
     }
 

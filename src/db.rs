@@ -459,6 +459,18 @@ impl Store {
         }
     }
 
+    pub async fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
+        let mut storage = self.entries.write().await;
+        let data = storage
+            .entry(key.to_string())
+            .or_insert_with(|| RedisData::new_sorted_set());
+        if let RecordType::SortedSet(sorted_set) = &mut data.record {
+            Ok(sorted_set.remove(members))
+        } else {
+            bail!(RedisError::WrongType);
+        }
+    }
+
     pub async fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
         let storage = self.entries.read().await;
         let Some(data) = storage.get(key) else {

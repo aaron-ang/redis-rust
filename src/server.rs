@@ -226,6 +226,7 @@ impl Server {
             Command::ZCard => Some(self.handle_zcard(args).await?),
             Command::ZRange => Some(self.handle_zrange(args).await?),
             Command::ZRank => Some(self.handle_zrank(args).await?),
+            Command::ZRem => Some(handle_zrem(args, &self.config.store).await?),
             Command::ZScore => Some(self.handle_zscore(args).await?),
         };
 
@@ -356,7 +357,7 @@ impl Server {
 
         let channels = args
             .iter()
-            .map(|v| unpack_bulk_string(v))
+            .map(unpack_bulk_string)
             .collect::<Result<Vec<_>>>()?;
 
         // Ensure we're in Subscribed mode, creating the fan-in channel if needed.
@@ -457,7 +458,7 @@ impl Server {
     async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<()> {
         let channels = args
             .iter()
-            .map(|v| unpack_bulk_string(v))
+            .map(unpack_bulk_string)
             .collect::<Result<Vec<_>>>()?;
 
         let forwarders = match &mut self.mode {
@@ -811,7 +812,7 @@ pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
     let key = unpack_bulk_string(&args[0])?;
     let elements = args[1..]
         .iter()
-        .map(|v| unpack_bulk_string(v))
+        .map(unpack_bulk_string)
         .collect::<Result<Vec<_>>>()?;
     let count = store.rpush(key, &elements).await?;
     Ok(Value::Integer(count))
@@ -863,7 +864,7 @@ pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
     let key = unpack_bulk_string(&args[0])?;
     let elements = args[1..]
         .iter()
-        .map(|v| unpack_bulk_string(v))
+        .map(unpack_bulk_string)
         .collect::<Result<Vec<_>>>()?;
     let count = store.lpush(key, &elements).await?;
     Ok(Value::Integer(count))
@@ -881,7 +882,7 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
     };
     let keys = args[..args.len() - 1]
         .iter()
-        .map(|v| unpack_bulk_string(v))
+        .map(unpack_bulk_string)
         .collect::<Result<Vec<_>>>()?;
     let elements = store.blpop(&keys, timeout).await?;
 
@@ -909,4 +910,18 @@ pub async fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
     }
 
     Ok(Value::Integer(added))
+}
+
+// ZREM key member [member ...]
+pub async fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 2 {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let members = args[1..]
+        .iter()
+        .map(unpack_bulk_string)
+        .collect::<Result<Vec<_>>>()?;
+    let removed = store.zrem(key, &members).await?;
+    Ok(Value::Integer(removed))
 }

@@ -102,6 +102,9 @@ impl Follower {
             Command::ZAdd => {
                 server::handle_zadd(args, &self.store).await?;
             }
+            Command::ZRem => {
+                server::handle_zrem(args, &self.store).await?;
+            }
             _ => eprintln!("Unknown command: {command}"),
         }
         Ok(())

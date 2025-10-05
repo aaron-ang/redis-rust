@@ -59,6 +59,7 @@ pub enum Command {
     ZCard,
     ZRange,
     ZRank,
+    ZRem,
     ZScore,
 }
 
@@ -74,6 +75,7 @@ impl Command {
                 | Command::Set
                 | Command::XAdd
                 | Command::ZAdd
+                | Command::ZRem
         )
     }
 }

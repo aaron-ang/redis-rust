@@ -63,6 +63,20 @@ impl SortedSetRecord {
         }
     }
 
+    pub fn remove(&mut self, members: &[&str]) -> i64 {
+        members
+            .iter()
+            .filter_map(|&member| {
+                self.by_member.remove(member).map(|score| {
+                    self.by_score.remove(&Entry {
+                        score,
+                        member: member.to_string(),
+                    });
+                })
+            })
+            .count() as i64
+    }
+
     pub fn range(&self, start: i64, end: i64) -> Vec<String> {
         let len = self.by_score.len();
 

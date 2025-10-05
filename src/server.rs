@@ -13,6 +13,7 @@ use tokio::{
 
 use crate::config::Config;
 use crate::db::{RecordType, Store};
+use crate::geocode::encode;
 use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
 use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
@@ -176,6 +177,7 @@ impl Server {
             Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
             Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::GeoAdd => Some(handle_geoadd(args, &self.config.store).await?),
             Command::Get => Some(handle_get(args, &self.config.store).await?),
             Command::Incr => Some(handle_incr(args, &self.config.store).await?),
             Command::Info => Some(self.handle_info()),
@@ -700,7 +702,12 @@ pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
         Ok(command) => Ok((command, &args[1..])),
         Err(_) => bail!(RedisError::UnknownCommand(
             command_str.to_string(),
-            QuotedArgs(args[1..].to_vec())
+            QuotedArgs(
+                args[1..]
+                    .iter()
+                    .map(|v| v.to_encoded_string().unwrap())
+                    .collect::<Vec<_>>()
+            )
         )),
     }
 }
@@ -924,4 +931,25 @@ pub async fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
         .collect::<Result<Vec<_>>>()?;
     let removed = store.zrem(key, &members).await?;
     Ok(Value::Integer(removed))
+}
+
+// GEOADD key longitude latitude member [longitude latitude member ...]
+pub async fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
+    if args.len() < 4 {
+        bail!(RedisError::InvalidArgument);
+    }
+    let key = unpack_bulk_string(&args[0])?;
+    let mut added = 0;
+
+    for i in (1..args.len()).step_by(3) {
+        let longitude = unpack_bulk_string(&args[i])?.parse::<f64>()?;
+        let latitude = unpack_bulk_string(&args[i + 1])?.parse::<f64>()?;
+        let member = unpack_bulk_string(&args[i + 2])?;
+        let score = encode(latitude, longitude);
+        if store.zadd(key, member, score as f64).await? {
+            added += 1;
+        }
+    }
+
+    Ok(Value::Integer(added))
 }

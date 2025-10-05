@@ -8,7 +8,6 @@ use std::{
 
 use anyhow::Result;
 use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
-use resp::Value;
 use strum::{Display, EnumString};
 use thiserror::Error;
 
@@ -33,6 +32,7 @@ pub enum Command {
     Discard,
     Echo,
     Exec,
+    GeoAdd,
     Get,
     Incr,
     Info,
@@ -81,14 +81,14 @@ impl Command {
 }
 
 #[derive(Debug)]
-pub struct QuotedArgs(pub Vec<Value>);
+pub struct QuotedArgs(pub Vec<String>);
 
 impl fmt::Display for QuotedArgs {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let formatted: String = self
             .0
             .iter()
-            .map(|s| format!("'{}'", s.to_encoded_string().unwrap()))
+            .map(|s| format!("'{}'", s))
             .collect::<Vec<_>>()
             .join(" ");
         write!(f, "{}", formatted)

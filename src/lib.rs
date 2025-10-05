@@ -7,6 +7,7 @@ mod server;
 mod sorted_set;
 mod stream;
 mod types;
+mod geocode;
 
 pub use config::Config;
 pub use db::Store;

@@ -59,18 +59,34 @@ impl SortedSetRecord {
         }
     }
 
-    pub fn range(&self, start: i64, mut end: i64) -> Vec<String> {
-        if start >= self.by_score.len() as i64 {
+    pub fn range(&self, start: i64, end: i64) -> Vec<String> {
+        let len = self.by_score.len();
+
+        let norm = |mut idx: i64| {
+            if idx < 0 {
+                idx += len as i64;
+                idx = idx.max(0);
+            }
+            idx as usize
+        };
+
+        let start = norm(start);
+        let mut end = norm(end);
+
+        if start >= len {
             return Vec::new();
         }
-        if end >= self.by_score.len() as i64 {
-            end = (self.by_score.len() as i64) - 1;
+
+        if end >= len {
+            end = len - 1;
         }
+
         if start > end {
             return Vec::new();
         }
+
         self.by_score
-            .index_range(start.max(0) as usize..(end + 1).max(0) as usize)
+            .index_range(start..end + 1)
             .map(|e| e.member.clone())
             .collect()
     }
@@ -82,5 +98,42 @@ impl SortedSetRecord {
             member: member.to_string(),
         };
         self.by_score.index_of(&key).map(|i| i as i64)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_range() {
+        let mut sorted_set = SortedSetRecord::new();
+        sorted_set.add("a", 1.0);
+        sorted_set.add("b", 2.0);
+        sorted_set.add("c", 3.0);
+
+        assert_eq!(sorted_set.range(0, 0), vec!["a"]);
+        assert_eq!(sorted_set.range(0, 1), vec!["a", "b"]);
+        assert_eq!(sorted_set.range(0, 2), vec!["a", "b", "c"]);
+        assert_eq!(sorted_set.range(0, 3), vec!["a", "b", "c"]);
+        assert_eq!(sorted_set.range(1, 1), vec!["b"]);
+        assert_eq!(sorted_set.range(1, 2), vec!["b", "c"]);
+        assert_eq!(sorted_set.range(1, 3), vec!["b", "c"]);
+        assert_eq!(sorted_set.range(2, 2), vec!["c"]);
+        assert_eq!(sorted_set.range(2, 3), vec!["c"]);
+
+        assert_eq!(sorted_set.range(2, 1), Vec::<String>::new());
+        assert_eq!(sorted_set.range(3, 2), Vec::<String>::new());
+    }
+
+    #[test]
+    fn test_negative_indices() {
+        let mut sorted_set = SortedSetRecord::new();
+        sorted_set.add("a", 1.0);
+        sorted_set.add("b", 2.0);
+        sorted_set.add("c", 3.0);
+
+        assert_eq!(sorted_set.range(-2, -1), vec!["b", "c"]);
+        assert_eq!(sorted_set.range(0, -2), vec!["a", "b"]);
     }
 }

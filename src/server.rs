@@ -1,4 +1,9 @@
-use std::{collections::HashMap, io::BufReader, str::FromStr, time::SystemTime};
+use std::{
+    collections::HashMap,
+    io::{BufReader, Cursor},
+    str::FromStr,
+    time::SystemTime,
+};
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
@@ -18,6 +23,10 @@ use crate::replication::ReplicaType;
 use crate::stream::StreamValue;
 use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
 
+pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+pub const REPL_OFFSET: usize = 0;
+pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
+
 enum ClientMode {
     Normal,
     Transaction {
@@ -32,6 +41,7 @@ enum ClientMode {
 pub struct Connection {
     stream: TcpStream,
     buffer: Vec<u8>,
+    read_buffer: Vec<u8>,
 }
 
 impl Connection {
@@ -39,6 +49,7 @@ impl Connection {
         Connection {
             stream,
             buffer: vec![0; 1024],
+            read_buffer: Vec::new(),
         }
     }
 
@@ -50,6 +61,39 @@ impl Connection {
         let mut decoder = Decoder::new(BufReader::new(&self.buffer[..bytes_read]));
         let value = decoder.decode()?;
         Ok(Some(value))
+    }
+
+    async fn read_values(&mut self) -> Result<Option<Vec<Value>>> {
+        let bytes_read = self.stream.read(&mut self.buffer).await?;
+        if bytes_read == 0 {
+            return Ok(None);
+        }
+
+        self.read_buffer
+            .extend_from_slice(&self.buffer[..bytes_read]);
+
+        let mut values = Vec::new();
+        let mut offset = 0;
+
+        loop {
+            let mut cursor = Cursor::new(&self.read_buffer[offset..]);
+            // Use minimal buffer to prevent read-ahead
+            let mut decoder = Decoder::new(BufReader::with_capacity(1, &mut cursor));
+
+            match decoder.decode() {
+                Ok(value) => {
+                    offset += cursor.position() as usize;
+                    values.push(value);
+                }
+                Err(_) => break,
+            }
+        }
+
+        if offset > 0 {
+            self.read_buffer.drain(..offset);
+        }
+
+        Ok(Some(values))
     }
 
     pub async fn read_value_with_timeout(&mut self, duration: Duration) -> Result<Option<Value>> {
@@ -76,10 +120,6 @@ impl Connection {
     }
 }
 
-pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
-pub const REPL_OFFSET: usize = 0;
-pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
-
 pub struct Server {
     config: Config,
     conn: Connection,
@@ -97,8 +137,8 @@ impl Server {
 
     pub async fn handle_conn(&mut self) -> Result<()> {
         loop {
-            let value = match self.conn.read_value().await {
-                Ok(Some(value)) => value,
+            let values = match self.conn.read_values().await {
+                Ok(Some(values)) => values,
                 Ok(None) => break,
                 Err(e) => {
                     eprintln!("Error reading from stream: {e}");
@@ -106,13 +146,20 @@ impl Server {
                 }
             };
 
-            match self.process(&value).await {
-                Ok(Some(response)) => self.conn.write_value(&response).await?,
-                Ok(None) => (),
-                Err(e) => {
-                    eprintln!("Error processing command: {e}");
-                    self.conn.write_value(&Value::Error(e.to_string())).await?;
+            let mut response_buf = Vec::new();
+            for value in values {
+                match self.process(&value).await {
+                    Ok(Some(response)) => response_buf.extend_from_slice(&response.encode()),
+                    Ok(None) => (),
+                    Err(e) => {
+                        eprintln!("Error processing command: {e}");
+                        response_buf.extend_from_slice(&Value::Error(e.to_string()).encode());
+                    }
                 }
+            }
+
+            if !response_buf.is_empty() {
+                self.conn.write_all(&response_buf).await?;
             }
         }
         Ok(())

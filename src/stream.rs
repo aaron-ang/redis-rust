@@ -82,9 +82,9 @@ impl StreamRecord {
                 .duration_since(SystemTime::UNIX_EPOCH)?
                 .as_millis();
             let seq_num = match ts_ms.cmp(&self.last_entry_id.ts_ms) {
-                std::cmp::Ordering::Less => todo!(),
-                std::cmp::Ordering::Equal => self.last_entry_id.seq_no + 1,
-                std::cmp::Ordering::Greater => 0,
+                Ordering::Less => todo!(),
+                Ordering::Equal => self.last_entry_id.seq_no + 1,
+                Ordering::Greater => 0,
             };
             return Ok(StreamEntryId::new(ts_ms, seq_num));
         }
@@ -95,12 +95,12 @@ impl StreamRecord {
 
         if seq_no_str == "*" {
             let ts_ms = ts_str.parse::<u128>()?;
-            if ts_ms < self.last_entry_id.ts_ms {
-                anyhow::bail!(RedisError::XAddIdInvalidSequence);
-            } else if ts_ms == self.last_entry_id.ts_ms {
-                Ok(StreamEntryId::new(ts_ms, self.last_entry_id.seq_no + 1))
-            } else {
-                Ok(StreamEntryId::new(ts_ms, 0))
+            match ts_ms.cmp(&self.last_entry_id.ts_ms) {
+                Ordering::Less => {
+                    anyhow::bail!(RedisError::XAddIdInvalidSequence);
+                }
+                Ordering::Equal => Ok(StreamEntryId::new(ts_ms, self.last_entry_id.seq_no + 1)),
+                Ordering::Greater => Ok(StreamEntryId::new(ts_ms, 0)),
             }
         } else {
             entry_id.parse()

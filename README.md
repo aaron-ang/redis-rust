@@ -9,7 +9,7 @@ It aims to replicate core Redis functionalities, including event loops and the R
 
 # Performance Benchmarks 📊
 
-This Redis implementation has been benchmarked against the official Redis server to measure performance characteristics. The benchmarks focus on read throughput using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure’s Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
+This Redis implementation has been benchmarked against the official Redis server to measure both throughput and latency characteristics using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure's Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
 
 ## Benchmark Configuration
 
@@ -22,13 +22,28 @@ This Redis implementation has been benchmarked against the official Redis server
 - **Key Space**: ~1.7M keys
 - **Operation**: GET commands (read-heavy workload)
 
-## Results
+## Throughput Results
 
-The latency distribution comparison shows competitive performance between this Rust implementation and the official Redis server:
+| Implementation          | Ops/sec     | Hits/sec | Misses/sec | Avg Latency (ms) |
+|-------------------------|-------------|----------|------------|------------------|
+| **Redis (Baseline)**    | 130,784     | 127,418  | 3,366      | 22.93            |
+| **Rust Implementation** | 628,732     | 314,356  | 314,376    | 4.77             |
+| **Improvement**         | +381%       | +147%    | +9,240%    | -79%             |
 
-![Latency by Percentile Distribution](benchmark/read_throughput.png)
+**Key Findings**:
+- 🚀 **4.8x** higher throughput (629K vs 131K ops/sec)
+- ⚡ **79%** lower average latency (4.8ms vs 22.9ms)
+- 📊 Higher misses/sec as a result of higher throughput
 
-**Summary**: For the majority of requests (P0-P99.999), this implementation achieves **lower latency** than the official Redis server, while maintaining similar performance at higher percentiles.
+## Latency Results
+
+![Latency by Percentile Distribution](benchmark/latency_distribution.png)
+
+| Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
+|-------------------------|-----------|----------|----------|------------|----------|
+| **Redis (Baseline)**    | 10.54     | 9.60     | 25.34    | 81.92      | 145.41   |
+| **Rust Implementation** | 8.42      | 8.16     | 17.28    | 62.72      | 164.86   |
+| **Improvement**         | 20%       | 15%      | 32%      | 23%        | -13%     |
 
 ## Running Benchmarks
 
@@ -39,12 +54,12 @@ To run the benchmarks yourself:
 ```
 
 The script will:
-1. Run benchmarks against the official Redis server (baseline)
-2. Run benchmarks against this Rust implementation
+1. Run **throughput benchmarks** against both Redis baseline and Rust implementation
+2. Run **latency benchmarks** against both implementations
 3. Generate HDR histogram files for detailed latency analysis
 4. Output results to the `benchmark/out/` directory
 
-You may generate a plot of the results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
+Generate plots of the latency results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
 
 ### Prerequisites
 

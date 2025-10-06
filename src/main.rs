@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpSocket, TcpStream};
 
 use codecrafters_redis::*;
 
@@ -34,7 +34,9 @@ async fn main() -> Result<()> {
     let config = setup_config().await?;
 
     let addr = SocketAddrV4::new(LOCALHOST, config.port);
-    let listener = TcpListener::bind(addr).await?;
+    let socket = TcpSocket::new_v4()?;
+    socket.bind(addr.into())?;
+    let listener = socket.listen(1024)?;
 
     println!("Server listening on {addr}");
 

@@ -44,22 +44,46 @@ load_data() {
         --clients=50 \
         --threads=6 \
         --key-maximum=1699396 \
-        -n allkeys \
-        --key-pattern=P:P \
         --ratio=1:0 \
-        --data-size=1024
+        --data-size=1024 \
+        -n allkeys \
+        --key-pattern=P:P
+    
+    # Wait for server to finish processing all queued commands
+    echo "Waiting for data processing to complete..."
+    sleep 5
+    
+    # Verify data was loaded
+    local dbsize=$(redis-cli dbsize)
+    echo "Database size: $dbsize"
+    if [ "$dbsize" -lt 1699396 ]; then
+        echo "Expected 1,699,396 keys but only got $dbsize"
+        exit 1
+    fi
 }
 
-run_get_benchmark() {
+run_throughput_benchmark() {
     local prefix=$1
-    echo "Running GET benchmark for $prefix..."
+    echo "Running throughput benchmark for $prefix..."
     memtier_benchmark \
         --pipeline=10 \
         --clients=50 \
         --threads=6 \
         --key-maximum=1699396 \
-        --key-pattern=R:R \
         --ratio=0:1 \
+        --data-size=1024 \
+        --distinct-client-seed \
+        --test-time 60
+}
+
+run_latency_benchmark() {
+    local prefix=$1
+    echo "Running latency benchmark for $prefix..."
+    memtier_benchmark \
+        --pipeline=10 \
+        --clients=50 \
+        --threads=6 \
+        --key-maximum=1699396 \
         --data-size=1024 \
         --distinct-client-seed \
         --test-time 60 \
@@ -69,10 +93,15 @@ run_get_benchmark() {
 ### Benchmark 1 (baseline)
 echo "=== Benchmark 1: Redis Baseline ==="
 brew services restart redis
+
 wait_for_server
 flush_db
 load_data "baseline"
-run_get_benchmark "baseline-get"
+run_throughput_benchmark "baseline"
+
+flush_db
+run_latency_benchmark "baseline"
+
 brew services stop redis
 
 ### Benchmark 2 (Rust implementation)
@@ -83,6 +112,9 @@ RUST_PID=$!
 wait_for_server
 flush_db
 load_data "redis-rs"
-run_get_benchmark "redis-rs-get"
+run_throughput_benchmark "redis-rs"
+
+flush_db
+run_latency_benchmark "redis-rs"
 
 echo "Benchmark completed!"

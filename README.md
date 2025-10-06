@@ -43,7 +43,8 @@ The script will:
 2. Run benchmarks against this Rust implementation
 3. Generate HDR histogram files for detailed latency analysis
 4. Output results to the `benchmark/out/` directory
-5. Generate a plot of the results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
+
+You may generate a plot of the results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
 
 ### Prerequisites
 

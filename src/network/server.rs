@@ -17,11 +17,11 @@ use tokio::{
 };
 
 use crate::config::Config;
-use crate::db::{RecordType, Store};
-use crate::geocode::{encode, is_valid_coordinate};
-use crate::replication::ReplicaType;
-use crate::stream::StreamValue;
+use crate::data::{RecordType, Store, StreamValue};
+use crate::geo::{encode, is_valid_coordinate};
 use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
+
+use super::replication::ReplicaType;
 
 pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 pub const REPL_OFFSET: usize = 0;

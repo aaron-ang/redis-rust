@@ -11,7 +11,7 @@ use resp::Value;
 use strum::Display;
 use tokio::{sync::mpsc, time::Duration};
 
-use crate::server::Connection;
+use super::server::Connection;
 
 const BROADCAST_CHANNEL_SIZE: usize = 16;
 

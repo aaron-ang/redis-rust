@@ -15,10 +15,11 @@ use tokio::{
     time::{self, Duration, Instant},
 };
 
-use crate::geocode::{decode, get_distance};
-use crate::sorted_set::SortedSetRecord;
-use crate::stream::{StreamEntryId, StreamRecord, StreamValue};
+use crate::geo::{decode, get_distance};
 use crate::types::{Instance, RedisError, StringRecord, XReadBlockType};
+
+use super::sorted_set::SortedSetRecord;
+use super::stream::{StreamEntryId, StreamRecord, StreamValue};
 
 pub enum RecordType {
     String(StringRecord),

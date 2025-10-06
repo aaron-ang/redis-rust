@@ -11,7 +11,7 @@ use byteorder::{BigEndian, LittleEndian, ReadBytesExt};
 use strum::{Display, EnumString};
 use thiserror::Error;
 
-use crate::db::{RecordType, RedisData, Store};
+use crate::data::{RecordType, RedisData, Store};
 
 // ============================================================================
 // CONSTANTS

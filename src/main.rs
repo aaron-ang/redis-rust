@@ -1,5 +1,5 @@
 use std::{
-    net::{Ipv4Addr, SocketAddrV4},
+    net::{Ipv6Addr, SocketAddrV6},
     path::PathBuf,
     sync::Arc,
 };
@@ -11,7 +11,6 @@ use tokio::net::{TcpSocket, TcpStream};
 use codecrafters_redis::*;
 
 const PORT: u16 = 6379;
-const LOCALHOST: Ipv4Addr = Ipv4Addr::new(127, 0, 0, 1);
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -33,8 +32,9 @@ struct Args {
 async fn main() -> Result<()> {
     let config = setup_config().await?;
 
-    let addr = SocketAddrV4::new(LOCALHOST, config.port);
-    let socket = TcpSocket::new_v4()?;
+    let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.port, 0, 0);
+    let socket = TcpSocket::new_v6()?;
+    socket.set_reuseaddr(true)?;
     socket.bind(addr.into())?;
     let listener = socket.listen(1024)?;
 

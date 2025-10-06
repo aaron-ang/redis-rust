@@ -11,7 +11,9 @@ It aims to replicate core Redis functionalities, including event loops and the R
 
 This Redis implementation has been benchmarked against the official Redis server to measure both throughput and latency characteristics using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure's Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
 
-## Benchmark Configuration
+## Throughput Benchmark
+
+### Configuration
 
 - **Tool**: `memtier_benchmark`
 - **Test Duration**: 60 seconds
@@ -19,31 +21,32 @@ This Redis implementation has been benchmarked against the official Redis server
 - **Connections**: 50 per thread (300 total)
 - **Pipeline**: 10 commands
 - **Data Size**: 1024 bytes
-- **Key Space**: ~1.7M keys
+- **Key Space**: ~1.7M keys  
 - **Operation**: GET commands (read-heavy workload)
 
-## Throughput Results
+### Results
 
-| Implementation          | Ops/sec     | Hits/sec | Misses/sec | Avg Latency (ms) |
-|-------------------------|-------------|----------|------------|------------------|
-| **Redis (Baseline)**    | 130,784     | 127,418  | 3,366      | 22.93            |
-| **Rust Implementation** | 628,732     | 314,356  | 314,376    | 4.77             |
-| **Improvement**         | +381%       | +147%    | +9,240%    | -79%             |
+| Implementation          | Ops/sec | KB/sec  | Avg Latency (ms) |
+| ----------------------- | ------- | ------- | ---------------- |
+| **Redis (Baseline)**    | 141,101 | 147,074 | 21.3             |
+| **Rust Implementation** | 214,975 | 224,075 | 14.1             |
+| **Improvement**         | +52%    | +52%    | +33%             |
 
-**Key Findings**:
-- 🚀 **4.8x** higher throughput (629K vs 131K ops/sec)
-- ⚡ **79%** lower average latency (4.8ms vs 22.9ms)
-- 📊 Higher misses/sec as a result of higher throughput
+## Latency Benchmark
 
-## Latency Results
+### Configuration
+
+Same as throughput benchmark, but with a 1:10 SET to GET command ratio.
+
+### Results
 
 ![Latency by Percentile Distribution](benchmark/latency_distribution.png)
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
-|-------------------------|-----------|----------|----------|------------|----------|
+| ----------------------- | --------- | -------- | -------- | ---------- | -------- |
 | **Redis (Baseline)**    | 10.54     | 9.60     | 25.34    | 81.92      | 145.41   |
 | **Rust Implementation** | 8.42      | 8.16     | 17.28    | 62.72      | 164.86   |
-| **Improvement**         | 20%       | 15%      | 32%      | 23%        | -13%     |
+| **Improvement**         | +20%      | +15%     | +32%     | +23%       | -13%     |
 
 ## Running Benchmarks
 

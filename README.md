@@ -7,6 +7,50 @@ It aims to replicate core Redis functionalities, including event loops and the R
 **Note**: If you're viewing this repo on GitHub, head over to
 [codecrafters.io](https://codecrafters.io) to try the challenge.
 
+# Performance Benchmarks 📊
+
+This Redis implementation has been benchmarked against the official Redis server to measure performance characteristics. The benchmarks focus on read throughput using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure’s Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
+
+## Benchmark Configuration
+
+- **Tool**: `memtier_benchmark`
+- **Test Duration**: 60 seconds
+- **Threads**: 6
+- **Connections**: 50 per thread (300 total)
+- **Pipeline**: 10 commands
+- **Data Size**: 1024 bytes
+- **Key Space**: ~1.7M keys
+- **Operation**: GET commands (read-heavy workload)
+
+## Results
+
+The latency distribution comparison shows competitive performance between this Rust implementation and the official Redis server:
+
+![Latency by Percentile Distribution](benchmark/read_throughput.png)
+
+**Summary**: For the majority of requests (P0-P99.999), this implementation achieves **lower latency** than the official Redis server, while maintaining similar performance at higher percentiles.
+
+## Running Benchmarks
+
+To run the benchmarks yourself:
+
+```bash
+./benchmark/benchmark.sh
+```
+
+The script will:
+1. Run benchmarks against the official Redis server (baseline)
+2. Run benchmarks against this Rust implementation
+3. Generate HDR histogram files for detailed latency analysis
+4. Output results to the `benchmark/out/` directory
+5. Generate a plot of the results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
+
+### Prerequisites
+
+- `redis-cli` installed
+- `memtier_benchmark` installed (`brew install memtier_benchmark` on macOS)
+- Official Redis server installed (`brew install redis` on macOS)
+
 # Features ✨
 
 This Redis clone supports the following features:

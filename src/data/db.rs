@@ -111,19 +111,17 @@ impl Store {
         self.entries.clear();
     }
 
-    pub fn get(&self, key: &str) -> Option<RecordType> {
+    pub fn get(&self, key: &str) -> Option<String> {
         let entry = self.entries.get(key)?;
-
         if entry.is_expired() {
             drop(entry);
             self.entries.remove(key);
             return None;
         }
-
         let RecordType::String(string_rec) = &entry.record else {
             return None;
         };
-        Some(RecordType::String(string_rec.clone()))
+        Some(string_rec.to_string())
     }
 
     pub fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
@@ -252,12 +250,7 @@ impl Store {
         let end = if end < 0 { len + end } else { end };
         let start = start.max(0) as usize;
         let end = end.min(len - 1) as usize;
-        Ok(list
-            .iter()
-            .skip(start)
-            .take(end - start + 1)
-            .cloned()
-            .collect())
+        Ok(list.range(start..=end).map(|s| s.to_owned()).collect())
     }
 
     pub fn llen(&self, key: &str) -> Result<i64> {
@@ -278,9 +271,9 @@ impl Store {
         for entry in self.entries.iter() {
             let (key, data) = entry.pair();
             if data.is_expired() {
-                expired.push(key.clone());
+                expired.push(key.to_owned());
             } else if pattern.matches(key) {
-                matched.push(key.clone());
+                matched.push(key.to_owned());
             }
         }
 
@@ -518,7 +511,7 @@ impl Store {
                     let (lat, lon) = decode(score as u64);
                     let distance = get_distance(from_lon, from_lat, lon, lat);
                     if distance <= radius_m {
-                        Some(member.to_string())
+                        Some(member.to_owned())
                     } else {
                         None
                     }

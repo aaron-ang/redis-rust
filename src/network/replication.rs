@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -28,6 +28,7 @@ pub struct ReplicationHub {
     next_id: AtomicUsize,
     senders: Mutex<HashMap<usize, mpsc::Sender<Value>>>,
     state: Arc<ReplicationState>,
+    has_replicas: AtomicBool,
 }
 
 impl ReplicationHub {
@@ -44,6 +45,14 @@ impl ReplicationHub {
         for id in to_remove {
             senders.remove(&id);
         }
+
+        if senders.is_empty() {
+            self.has_replicas.store(false, Ordering::Release);
+        }
+    }
+
+    pub fn has_replicas(&self) -> bool {
+        self.has_replicas.load(Ordering::Acquire)
     }
 
     pub fn num_replicas(&self) -> usize {
@@ -97,11 +106,16 @@ impl ReplicationHub {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(BROADCAST_CHANNEL_SIZE);
         self.senders.lock().unwrap().insert(id, tx);
+        self.has_replicas.store(true, Ordering::Release);
         (id, rx)
     }
 
     fn unregister(&self, id: usize) {
-        self.senders.lock().unwrap().remove(&id);
+        let mut senders = self.senders.lock().unwrap();
+        senders.remove(&id);
+        if senders.is_empty() {
+            self.has_replicas.store(false, Ordering::Release);
+        }
     }
 }
 

@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::config::Config;
-use crate::data::{RecordType, Store, StreamValue};
+use crate::data::{Store, StreamValue};
 use crate::geo::{encode, is_valid_coordinate};
 use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
 
@@ -284,7 +284,10 @@ impl Server {
             Command::ZScore => Some(self.handle_zscore(args)?),
         };
 
-        if command.is_write() && self.config.role == ReplicaType::Leader {
+        if command.is_write()
+            && self.config.role == ReplicaType::Leader
+            && self.config.replication.has_replicas()
+        {
             self.config.replication.publish(cmd_line.clone());
             self.config.replication.incr_num_commands();
         }
@@ -901,9 +904,8 @@ pub fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     }
     let key = unpack_bulk_string(&args[0])?;
     match store.get(key) {
-        Some(RecordType::String(s)) => Ok(Value::Bulk(s.to_string())),
+        Some(s) => Ok(Value::Bulk(s)),
         None => Ok(Value::Null),
-        _ => unimplemented!(),
     }
 }
 

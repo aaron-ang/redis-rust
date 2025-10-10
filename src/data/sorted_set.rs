@@ -98,7 +98,7 @@ impl SortedSetRecord {
 
         self.by_score
             .index_range(start..end + 1)
-            .map(|e| e.member.clone())
+            .map(|e| e.member.to_owned())
             .collect()
     }
 

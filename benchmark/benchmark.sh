@@ -13,10 +13,12 @@ cleanup() {
     if [ -n "$RUST_PID" ] && kill -0 $RUST_PID 2>/dev/null; then
         echo "Cleaning up Rust server (PID: $RUST_PID)..."
         kill $RUST_PID 2>/dev/null || true
+        wait $RUST_PID 2>/dev/null || true
+        RUST_PID=""
     fi
 }
 
-trap cleanup EXIT INT TERM
+trap cleanup INT TERM
 
 wait_for_server() {
     echo "Waiting for server to be ready..."
@@ -27,7 +29,7 @@ wait_for_server() {
         fi
         sleep 1
     done
-    echo "Server failed to start"
+    echo "Server failed to start within 30 seconds"
     exit 1
 }
 
@@ -90,31 +92,31 @@ run_latency_benchmark() {
         --hdr-file-prefix="out/$prefix"
 }
 
-### Benchmark 1 (baseline)
-echo "=== Benchmark 1: Redis Baseline ==="
-brew services restart redis
-
-wait_for_server
-flush_db
-load_data "baseline"
-run_throughput_benchmark "baseline"
-
-flush_db
-run_latency_benchmark "baseline"
-
-brew services stop redis
-
-### Benchmark 2 (Rust implementation)
-echo "=== Benchmark 2: Rust Implementation ==="
+### Benchmark 1 (Rust implementation)
+echo "=== Benchmark 1: Rust Implementation ==="
 ../your_program.sh >/dev/null 2>&1 &
 RUST_PID=$!
-
 wait_for_server
+
 flush_db
 load_data "redis-rs"
 run_throughput_benchmark "redis-rs"
 
 flush_db
 run_latency_benchmark "redis-rs"
+cleanup
+
+### Benchmark 2 (baseline)
+echo "=== Benchmark 1: Redis Baseline ==="
+brew services restart redis
+wait_for_server
+
+flush_db
+load_data "baseline"
+run_throughput_benchmark "baseline"
+
+flush_db
+run_latency_benchmark "baseline"
+brew services stop redis
 
 echo "Benchmark completed!"

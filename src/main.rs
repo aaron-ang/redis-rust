@@ -1,12 +1,12 @@
 use std::{
-    net::{Ipv6Addr, SocketAddrV6},
+    net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
     sync::Arc,
 };
 
 use anyhow::{bail, Result};
 use clap::Parser;
-use tokio::net::{TcpSocket, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
 
 use codecrafters_redis::*;
 
@@ -32,11 +32,8 @@ struct Args {
 async fn main() -> Result<()> {
     let config = setup_config().await?;
 
-    let addr = SocketAddrV6::new(Ipv6Addr::UNSPECIFIED, config.port, 0, 0);
-    let socket = TcpSocket::new_v6()?;
-    socket.set_reuseaddr(true)?;
-    socket.bind(addr.into())?;
-    let listener = socket.listen(1024)?;
+    let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
+    let listener = TcpListener::bind(addr).await?;
 
     println!("Server listening on {addr}");
 

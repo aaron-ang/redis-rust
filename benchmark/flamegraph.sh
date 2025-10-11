@@ -39,34 +39,26 @@ flush_db() {
     redis-cli flushall
 }
 
-turn_off_persistence() {
-    echo "Turning off persistence for Redis server..."
-    redis-cli config set save ""
-}
-
-run_latency_benchmark() {
+run_benchmark() {
+    flush_db
     local prefix=$1
     echo "Running latency benchmark for $prefix..."
     memtier_benchmark \
-        --pipeline=10 \
-        --clients=50 \
-        --threads=6 \
-        --key-maximum=1699396 \
-        --data-size=1024 \
+        --ipv4 \
+        --hide-histogram \
         --distinct-client-seed \
-        --test-time 60 \
-        --hdr-file-prefix="out/$prefix"
+        --test-time 30
 }
 
 echo "=== Generating Flamegraph for Rust Redis Implementation ==="
 
 # Start flamegraph profiling for Rust implementation
 echo "Starting flamegraph profiling for Rust implementation..."
-setsid cargo flamegraph --output flamegraph-rs.svg &
+setsid cargo flamegraph -o flamegraph-rs.svg --deterministic &
 FLAME_PID=$!
 
 wait_for_server
-run_latency_benchmark "redis-rs"
+run_benchmark "redis-rs"
 cleanup
 
 echo "=== Generating Flamegraph for Redis Server ==="
@@ -74,16 +66,12 @@ echo "=== Generating Flamegraph for Redis Server ==="
 # Start flamegraph profiling for Redis server
 echo "Starting flamegraph profiling for Redis server..."
 REDIS_SERVER_PATH=$(which redis-server)
-setsid flamegraph -o flamegraph-redis-server.svg -- $REDIS_SERVER_PATH &
+setsid flamegraph -o flamegraph-redis-server.svg --deterministic -- $REDIS_SERVER_PATH &
 FLAME_PID=$!
 
 wait_for_server
-flush_db
-turn_off_persistence
-run_latency_benchmark "redis-server"
+redis-cli config set save "" # turn off persistence
+run_benchmark "baseline"
 cleanup
 
 echo "Flamegraph generation completed!"
-echo "Generated files:"
-echo "  - flamegraph-rs.svg (Rust implementation)"
-echo "  - flamegraph-redis-server.svg (Redis server)"

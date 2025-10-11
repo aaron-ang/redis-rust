@@ -15,28 +15,30 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ### Configuration
 
-- **Tool**: `memtier_benchmark`
 - **Test Duration**: 60 seconds
 - **Threads**: 6
 - **Connections**: 50 per thread (300 total)
 - **Pipeline**: 10 commands
 - **Data Size**: 1024 bytes
 - **Key Space**: ~1.7M keys  
-- **Operation**: GET commands (read-heavy workload)
+- **Operation**: GET only
 
 ### Results
 
 | Implementation          | Ops/sec | KB/sec  | Avg Latency (ms) |
 | ----------------------- | ------- | ------- | ---------------- |
-| **Redis (Baseline)**    | 141,101 | 147,074 | 21.3             |
-| **Rust Implementation** | 214,975 | 224,075 | 14.1             |
-| **Improvement**         | +52%    | +52%    | +33%             |
+| **Redis (Baseline)**    | 130,054 | 135,560 | 23.1             |
+| **Rust Implementation** | 173,509 | 180,854 | 17.3             |
+| **Improvement**         | +33%    | +33%    | +25%             |
 
 ## Latency Benchmark
 
 ### Configuration
 
-Same as throughput benchmark, but with a 1:10 SET to GET command ratio.
+- **Threads**: 4
+- **Connections**: 50 per thread (200 total)
+- **Pipeline**: 1 command
+- Rest same as throughput benchmark
 
 ### Results
 
@@ -44,9 +46,9 @@ Same as throughput benchmark, but with a 1:10 SET to GET command ratio.
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
 | ----------------------- | --------- | -------- | -------- | ---------- | -------- |
-| **Redis (Baseline)**    | 10.54     | 9.60     | 25.34    | 81.92      | 145.41   |
-| **Rust Implementation** | 8.42      | 8.16     | 17.28    | 62.72      | 164.86   |
-| **Improvement**         | +20%      | +15%     | +32%     | +23%       | -13%     |
+| **Redis (Baseline)**    | 4.01      | 4.00     | 5.82     | 10.24      | 81.41    |
+| **Rust Implementation** | 3.83      | 3.83     | 4.67     | 7.42       | 54.78    |
+| **Improvement**         | +4%       | +4%      | +20%     | +28%       | +33%     |
 
 ## Running Benchmarks
 
@@ -63,6 +65,14 @@ The script will:
 4. Output results to the `benchmark/out/` directory
 
 Generate plots of the latency results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
+
+## Flamegraphs
+
+### Rust Implementation
+![Rust Implementation Flamegraph](benchmark/flamegraph-rs.svg)
+
+### Baseline
+![Baseline Flamegraph](benchmark/flamegraph-redis-server.svg)
 
 ### Prerequisites
 

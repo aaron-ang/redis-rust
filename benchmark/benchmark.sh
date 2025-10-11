@@ -39,9 +39,12 @@ flush_db() {
 }
 
 load_data() {
+    flush_db
     local prefix=$1
     echo "Loading data for $prefix..."
-    memtier_benchmark --hide-histogram \
+    memtier_benchmark \
+        --ipv4 \
+        --hide-histogram \
         --pipeline=10 \
         --clients=50 \
         --threads=6 \
@@ -68,6 +71,7 @@ run_throughput_benchmark() {
     local prefix=$1
     echo "Running throughput benchmark for $prefix..."
     memtier_benchmark \
+        --ipv4 \
         --pipeline=10 \
         --clients=50 \
         --threads=6 \
@@ -82,10 +86,9 @@ run_latency_benchmark() {
     local prefix=$1
     echo "Running latency benchmark for $prefix..."
     memtier_benchmark \
-        --pipeline=10 \
-        --clients=50 \
-        --threads=6 \
+        --ipv4 \
         --key-maximum=1699396 \
+        --ratio=0:1 \
         --data-size=1024 \
         --distinct-client-seed \
         --test-time 60 \
@@ -94,29 +97,25 @@ run_latency_benchmark() {
 
 ### Benchmark 1 (Rust implementation)
 echo "=== Benchmark 1: Rust Implementation ==="
-../your_program.sh >/dev/null 2>&1 &
+cargo run --release >/dev/null 2>&1 &
 RUST_PID=$!
 wait_for_server
 
-flush_db
 load_data "redis-rs"
 run_throughput_benchmark "redis-rs"
-
-flush_db
 run_latency_benchmark "redis-rs"
 cleanup
 
 ### Benchmark 2 (baseline)
-echo "=== Benchmark 1: Redis Baseline ==="
-brew services restart redis
+echo "=== Benchmark 2: Redis Baseline ==="
+redis-server >/dev/null 2>&1 &
+RUST_PID=$!
 wait_for_server
+redis-cli config set save "" # turn off persistence
 
-flush_db
 load_data "baseline"
 run_throughput_benchmark "baseline"
-
-flush_db
 run_latency_benchmark "baseline"
-brew services stop redis
+cleanup
 
 echo "Benchmark completed!"

@@ -1,30 +1,42 @@
 #!/bin/bash
+set -euo pipefail
 
-set -e
+KEY_MAX="${KEY_MAX:-1699396}"
+TEST_TIME="${TEST_TIME:-30}"
 
-export CARGO_PROFILE_RELEASE_DEBUG=true
-
-if [ "$(basename "$(pwd)")" != "benchmark" ]; then
-    cd benchmark/
-fi
-
+REDIS_PID=""
 FLAME_PID=""
 
 cleanup() {
-    if [ -n "$FLAME_PID" ]; then
-        echo "Stopping flamegraph process (PID: $FLAME_PID)..."
-        kill -INT -"$FLAME_PID" 2>/dev/null || true
+    if [[ -n "${REDIS_PID}" ]] && kill -0 "${REDIS_PID}" 2>/dev/null; then
+        echo "Stopping Redis server (PID: $REDIS_PID)..."
+        kill "$REDIS_PID" 2>/dev/null || true
+        wait "$REDIS_PID" 2>/dev/null || true
+        REDIS_PID=""
+    fi
+    if [[ -n "${FLAME_PID}" ]] && kill -0 "${FLAME_PID}" 2>/dev/null; then
+        echo "Waiting for flamegraph to complete (PID: $FLAME_PID)..."
         wait "$FLAME_PID" 2>/dev/null || true
         FLAME_PID=""
     fi
 }
 
-trap cleanup INT TERM
+trap cleanup INT TERM EXIT
+
+# Move into benchmark directory if not already there
+if [ "$(basename "$PWD")" != "benchmark" ]; then
+    if [ -d benchmark ]; then
+        cd benchmark || exit 1
+    else
+        echo "Error: benchmark directory not found"
+        exit 1
+    fi
+fi
 
 wait_for_server() {
     echo "Waiting for server to be ready..."
     for i in {1..30}; do
-        if redis-cli ping >/dev/null 2>&1; then
+        if redis-cli ping &>/dev/null; then
             echo "Server is ready!"
             return 0
         fi
@@ -39,38 +51,68 @@ flush_db() {
     redis-cli flushall
 }
 
-run_benchmark() {
-    flush_db
+load_data() {
     local prefix=$1
-    echo "Running latency benchmark for $prefix..."
+    flush_db
+    echo "Loading data for ${prefix}..."
     memtier_benchmark \
         --ipv4 \
         --hide-histogram \
+        --key-maximum="${KEY_MAX}" \
+        --ratio=1:0 \
+        --data-size=1024 \
+        --key-pattern=P:P \
+        -n allkeys
+
+    local dbsize
+    dbsize=$(redis-cli dbsize)
+    echo "Database size: ${dbsize}"
+    if [[ "${dbsize}" -lt "${KEY_MAX}" ]]; then
+        echo "Expected ${KEY_MAX} keys but only got ${dbsize}"
+        exit 1
+    fi
+}
+
+run_benchmark() {
+    local prefix=$1
+    echo "Running benchmark for $prefix..."
+    memtier_benchmark \
+        --ipv4 \
+        --key-maximum="${KEY_MAX}" \
+        --ratio=0:1 \
+        --data-size=1024 \
         --distinct-client-seed \
-        --test-time 30
+        --test-time "${TEST_TIME}"
 }
 
 echo "=== Generating Flamegraph for Rust Redis Implementation ==="
-
-# Start flamegraph profiling for Rust implementation
-echo "Starting flamegraph profiling for Rust implementation..."
-setsid cargo flamegraph -o flamegraph-rs.svg --deterministic &
-FLAME_PID=$!
-
+export CARGO_PROFILE_RELEASE_DEBUG=true
+cargo run --release &>/dev/null &
+REDIS_PID=$!
 wait_for_server
+
+load_data "redis-rs"
+setsid flamegraph -p $REDIS_PID \
+    -o flamegraph-rs.svg \
+    --title "Redis Rust Implementation" \
+    --deterministic \
+    &
+FLAME_PID=$!
 run_benchmark "redis-rs"
 cleanup
 
 echo "=== Generating Flamegraph for Redis Server ==="
-
-# Start flamegraph profiling for Redis server
-echo "Starting flamegraph profiling for Redis server..."
-REDIS_SERVER_PATH=$(which redis-server)
-setsid flamegraph -o flamegraph-redis-server.svg --deterministic -- $REDIS_SERVER_PATH &
-FLAME_PID=$!
-
+redis-server --save "" &>/dev/null &
+REDIS_PID=$!
 wait_for_server
-redis-cli config set save "" # turn off persistence
+
+load_data "baseline"
+setsid flamegraph -p $REDIS_PID \
+    -o flamegraph-redis-server.svg \
+    --title "Redis Baseline" \
+    --deterministic \
+    &
+FLAME_PID=$!
 run_benchmark "baseline"
 cleanup
 

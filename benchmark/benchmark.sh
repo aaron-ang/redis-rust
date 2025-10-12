@@ -7,15 +7,15 @@ CLIENTS="${CLIENTS:-50}"
 THREADS="${THREADS:-6}"
 PIPELINE="${PIPELINE:-10}"
 
-RUST_PID=""
+REDIS_PID=""
 
 cleanup() {
-    if [[ -n "${RUST_PID}" ]] && kill -0 "${RUST_PID}" 2>/dev/null; then
-        echo "Cleaning up server (PID: ${RUST_PID})..."
-        kill "${RUST_PID}" 2>/dev/null || true
-        wait "${RUST_PID}" 2>/dev/null || true
+    if [[ -n "${REDIS_PID}" ]] && kill -0 "${REDIS_PID}" 2>/dev/null; then
+        echo "Stopping Redis server (PID: ${REDIS_PID})..."
+        kill "${REDIS_PID}" 2>/dev/null || true
+        wait "${REDIS_PID}" 2>/dev/null || true
     fi
-    RUST_PID=""
+    REDIS_PID=""
 }
 
 trap cleanup INT TERM EXIT
@@ -33,9 +33,9 @@ fi
 wait_for_server() {
     echo "Waiting for Redis..."
     for i in {1..30}; do
-        if redis-cli ping >/dev/null 2>&1; then
-        echo "Server is ready!"
-        return 0
+        if redis-cli ping &>/dev/null; then
+            echo "Server is ready!"
+            return 0
         fi
         sleep 1
     done
@@ -64,9 +64,6 @@ load_data() {
         --key-pattern=P:P \
         -n allkeys
 
-    echo "Waiting for data processing to complete..."
-    sleep 5
-
     local dbsize
     dbsize=$(redis-cli dbsize)
     echo "Database size: ${dbsize}"
@@ -74,9 +71,9 @@ load_data() {
         echo "Expected ${KEY_MAX} keys but only got ${dbsize}"
         exit 1
     fi
-    }
+}
 
-    run_throughput_benchmark() {
+run_throughput_benchmark() {
     local prefix=$1
     echo "Running throughput benchmark for ${prefix}..."
     memtier_benchmark \
@@ -106,8 +103,8 @@ run_latency_benchmark() {
 }
 
 echo "=== Benchmark 1: Rust Implementation ==="
-cargo run --release >/dev/null 2>&1 &
-RUST_PID=$!
+cargo run --release &>/dev/null &
+REDIS_PID=$!
 wait_for_server
 
 load_data "redis-rs"
@@ -116,8 +113,8 @@ run_latency_benchmark "redis-rs"
 cleanup
 
 echo "=== Benchmark 2: Redis Baseline ==="
-redis-server --save "" >/dev/null 2>&1 &
-RUST_PID=$!
+redis-server --save "" &>/dev/null &
+REDIS_PID=$!
 wait_for_server
 
 load_data "baseline"

@@ -14,9 +14,8 @@ use tokio::{
 use crate::data::Store;
 use crate::types::Command;
 
-use super::server::{self, EMPTY_RDB_B64};
+use super::server::{self, BUFFER_SIZE, EMPTY_RDB_B64};
 
-const BUFFER_SIZE: usize = 1024;
 const PSYNC_RESPONSE_LEN: usize = 56;
 
 pub struct Follower {
@@ -37,16 +36,14 @@ impl Follower {
     }
 
     pub async fn handle_conn(&mut self) -> Result<()> {
-        self.connect_to_leader().await?;
-
         let mut buf = vec![0; BUFFER_SIZE];
+        self.connect_to_leader().await?;
         loop {
             let bytes_read = self.leader_stream.read(&mut buf).await?;
             if bytes_read == 0 {
                 eprintln!("Leader closed connection");
                 break;
             }
-
             self.process_commands(&buf[..bytes_read]).await?;
         }
         Ok(())

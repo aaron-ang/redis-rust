@@ -3,6 +3,7 @@ use std::{
     fmt,
     io::Read,
     str::FromStr,
+    sync::Arc,
     time::{Duration, UNIX_EPOCH},
 };
 
@@ -138,7 +139,7 @@ pub enum RedisError {
 
 #[derive(Clone, PartialEq, Eq, Hash)]
 pub enum StringRecord {
-    String(String),
+    String(Arc<str>),
     Integer(i64),
 }
 
@@ -146,13 +147,16 @@ impl StringRecord {
     pub fn incr(&mut self) -> Result<i64> {
         match self {
             StringRecord::String(s) => {
-                let mut i = s.parse::<i64>().map_err(|_| RedisError::InvalidInteger)?;
-                i += 1;
-                *s = i.to_string();
-                Ok(i)
+                let val = s
+                    .parse::<i64>()
+                    .map_err(|_| RedisError::InvalidInteger)?
+                    .checked_add(1)
+                    .ok_or(RedisError::InvalidInteger)?;
+                *s = Arc::from(val.to_string());
+                Ok(val)
             }
             StringRecord::Integer(i) => {
-                *i += 1;
+                *i = i.checked_add(1).ok_or(RedisError::InvalidInteger)?;
                 Ok(*i)
             }
         }
@@ -162,15 +166,15 @@ impl StringRecord {
 impl fmt::Display for StringRecord {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StringRecord::String(s) => write!(f, "{s}"),
+            StringRecord::String(s) => f.write_str(s),
             StringRecord::Integer(i) => write!(f, "{i}"),
         }
     }
 }
 
-impl<T: AsRef<str>> From<T> for StringRecord {
-    fn from(value: T) -> Self {
-        StringRecord::String(value.as_ref().to_string())
+impl From<&str> for StringRecord {
+    fn from(value: &str) -> Self {
+        StringRecord::String(Arc::from(value))
     }
 }
 
@@ -356,7 +360,7 @@ fn read_string<T: Read>(buf: &mut T) -> Result<StringRecord> {
         LengthValue::Length(length) => {
             let mut bytes = vec![0u8; length];
             buf.read_exact(&mut bytes)?;
-            Ok(StringRecord::String(String::from_utf8(bytes)?))
+            Ok(StringRecord::String(Arc::from(String::from_utf8(bytes)?)))
         }
         LengthValue::IntegerAsString8 => Ok(StringRecord::Integer(buf.read_u8()?.into())),
         LengthValue::IntegerAsString16 => Ok(StringRecord::Integer(
@@ -370,7 +374,7 @@ fn read_string<T: Read>(buf: &mut T) -> Result<StringRecord> {
             let _ulen = read_numeric_length(buf)?;
             let mut bytes = vec![0u8; clen];
             buf.read_exact(&mut bytes)?;
-            Ok(StringRecord::String(String::from_utf8(bytes)?))
+            Ok(StringRecord::String(Arc::from(String::from_utf8(bytes)?)))
         }
     }
 }

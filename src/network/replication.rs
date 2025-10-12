@@ -1,15 +1,13 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
-        Arc, Mutex,
-    },
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Arc,
 };
 
 use anyhow::Result;
+use dashmap::DashMap;
 use resp::Value;
 use strum::Display;
-use tokio::{sync::mpsc, time::Duration};
+use tokio::sync::mpsc;
 
 use super::server::Connection;
 
@@ -26,37 +24,22 @@ pub enum ReplicaType {
 #[derive(Default)]
 pub struct ReplicationHub {
     next_id: AtomicUsize,
-    senders: Mutex<HashMap<usize, mpsc::Sender<Value>>>,
+    senders: DashMap<usize, mpsc::Sender<Value>>,
     state: Arc<ReplicationState>,
-    has_replicas: AtomicBool,
 }
 
 impl ReplicationHub {
     pub fn publish(&self, msg: Value) {
-        let mut to_remove = Vec::new();
-        let mut senders = self.senders.lock().unwrap();
-
-        for (&id, sender) in senders.iter() {
-            if sender.try_send(msg.clone()).is_err() {
-                to_remove.push(id);
-            }
-        }
-
-        for id in to_remove {
-            senders.remove(&id);
-        }
-
-        if senders.is_empty() {
-            self.has_replicas.store(false, Ordering::Release);
-        }
+        self.senders
+            .retain(|_, sender| sender.try_send(msg.clone()).is_ok());
     }
 
     pub fn has_replicas(&self) -> bool {
-        self.has_replicas.load(Ordering::Acquire)
+        !self.senders.is_empty()
     }
 
     pub fn num_replicas(&self) -> usize {
-        self.senders.lock().unwrap().len()
+        self.senders.len()
     }
 
     pub fn get_num_ack(&self) -> usize {
@@ -72,28 +55,23 @@ impl ReplicationHub {
         self.state.reset()
     }
 
-    pub async fn run_replica(self: &Arc<Self>, conn: &mut Connection) -> Result<()> {
+    pub async fn run_replica(&self, conn: &mut Connection) -> Result<()> {
         let (id, mut rx) = self.register();
         loop {
             tokio::select! {
                 maybe_msg = rx.recv() => {
-                    match maybe_msg {
-                        Some(msg) => {
-                            conn.write_value(&msg).await?;
-                        }
-                        None => break,
+                    if let Some(msg) = maybe_msg {
+                        conn.write_value(&msg).await?
+                    } else {
+                        break;
                     }
                 }
-                ack = conn.read_value_with_timeout(Duration::from_millis(100)) => {
-                    match ack {
-                        Ok(Some(_)) => {
-                            self.state.incr_num_ack()
-                        }
-                        Ok(None) => { /* timeout */ }
-                        Err(e) => {
-                            eprintln!("Error reading ACK: {e}");
-                            break;
-                        }
+                ack = conn.read_value() => {
+                    if let Err(e) = ack {
+                        eprintln!("Error reading ACK: {e}");
+                        break;
+                    } else {
+                        self.state.incr_num_ack();
                     }
                 }
             }
@@ -105,17 +83,12 @@ impl ReplicationHub {
     fn register(&self) -> (usize, mpsc::Receiver<Value>) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel(BROADCAST_CHANNEL_SIZE);
-        self.senders.lock().unwrap().insert(id, tx);
-        self.has_replicas.store(true, Ordering::Release);
+        self.senders.insert(id, tx);
         (id, rx)
     }
 
     fn unregister(&self, id: usize) {
-        let mut senders = self.senders.lock().unwrap();
-        senders.remove(&id);
-        if senders.is_empty() {
-            self.has_replicas.store(false, Ordering::Release);
-        }
+        self.senders.remove(&id);
     }
 }
 

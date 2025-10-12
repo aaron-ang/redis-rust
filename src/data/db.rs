@@ -111,7 +111,7 @@ impl Store {
         self.entries.clear();
     }
 
-    pub fn get(&self, key: &str) -> Option<String> {
+    pub fn get(&self, key: &str) -> Option<StringRecord> {
         let entry = self.entries.get(key)?;
         if entry.is_expired() {
             drop(entry);
@@ -121,7 +121,7 @@ impl Store {
         let RecordType::String(string_rec) = &entry.record else {
             return None;
         };
-        Some(string_rec.to_string())
+        Some(string_rec.clone())
     }
 
     pub fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
@@ -179,10 +179,10 @@ impl Store {
             }
 
             // 2. Register a waiter for each key
-            let mut receivers = Vec::new();
+            let mut receivers = Vec::with_capacity(keys.len());
             {
                 let mut waiters = self.list_waiters.write().await;
-                for &key in keys {
+                for key in keys {
                     let (tx, rx) = oneshot::channel();
                     waiters.entry(key.to_string()).or_default().push_back(tx);
                     receivers.push(rx);
@@ -215,7 +215,15 @@ impl Store {
         let RecordType::List(list) = &mut entry.record else {
             bail!(RedisError::WrongType);
         };
-        Ok((0..count).filter_map(|_| list.pop_front()).collect())
+        let mut result = Vec::with_capacity(count);
+        for _ in 0..count {
+            if let Some(val) = list.pop_front() {
+                result.push(val);
+            } else {
+                break;
+            }
+        }
+        Ok(result)
     }
 
     pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
@@ -450,16 +458,15 @@ impl Store {
     }
 
     pub fn geodist(&self, key: &str, member1: &str, member2: &str) -> Result<Option<f64>> {
-        let Some(entry) = self.entries.get(key) else {
-            return Ok(None);
+        let (score1, score2) = {
+            let Some(entry) = self.entries.get(key) else {
+                return Ok(None);
+            };
+            let RecordType::SortedSet(sorted_set) = &entry.record else {
+                bail!(RedisError::WrongType);
+            };
+            (sorted_set.score(member1), sorted_set.score(member2))
         };
-        let RecordType::SortedSet(sorted_set) = &entry.record else {
-            bail!(RedisError::WrongType);
-        };
-
-        let score1 = sorted_set.score(member1);
-        let score2 = sorted_set.score(member2);
-
         match (score1, score2) {
             (Some(score1), Some(score2)) => {
                 let (lat1, lon1) = decode(score1 as u64);

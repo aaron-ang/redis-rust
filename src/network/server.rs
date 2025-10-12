@@ -1,20 +1,19 @@
 use std::{
     collections::HashMap,
-    io::{BufReader, Cursor},
+    io::{BufReader, ErrorKind},
     str::FromStr,
     time::SystemTime,
 };
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
-use bytes::{Buf, BytesMut};
 use resp::{Decoder, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
     sync::mpsc,
     task::JoinHandle,
-    time::{sleep, timeout, Duration, Instant},
+    time::{sleep, Duration, Instant},
 };
 
 use crate::config::Config;
@@ -24,8 +23,9 @@ use crate::types::{Command, QuotedArgs, RedisError, XReadBlockType};
 
 use super::replication::ReplicaType;
 
-pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+pub const BUFFER_SIZE: usize = 1024;
 pub const REPL_OFFSET: usize = 0;
+pub const REPL_ID: &str = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 pub const EMPTY_RDB_B64: &str = "UkVESVMwMDEx+glyZWRpcy12ZXIFNy4yLjD6CnJlZGlzLWJpdHPAQPoFY3RpbWXCbQi8ZfoIdXNlZC1tZW3CsMQQAPoIYW9mLWJhc2XAAP/wbjv+wP9aog==";
 
 enum ClientMode {
@@ -42,65 +42,76 @@ enum ClientMode {
 pub struct Connection {
     stream: TcpStream,
     buffer: Vec<u8>,
-    read_buffer: BytesMut,
 }
 
 impl Connection {
     fn new(stream: TcpStream) -> Self {
         Connection {
             stream,
-            buffer: vec![0; 1024],
-            read_buffer: BytesMut::with_capacity(4096),
+            buffer: Vec::with_capacity(BUFFER_SIZE),
         }
     }
 
-    async fn read_value(&mut self) -> Result<Option<Value>> {
-        let bytes_read = self.stream.read(&mut self.buffer).await?;
-        if bytes_read == 0 {
-            return Ok(None);
-        }
-        let mut decoder = Decoder::new(BufReader::new(&self.buffer[..bytes_read]));
-        let value = decoder.decode()?;
-        Ok(Some(value))
-    }
+    pub async fn read_value(&mut self) -> Result<Value> {
+        let mut temp_buf = vec![0; BUFFER_SIZE];
 
-    async fn read_values(&mut self) -> Result<Option<Vec<Value>>> {
-        let bytes_read = self.stream.read(&mut self.buffer).await?;
-        if bytes_read == 0 {
-            return Ok(None);
-        }
-
-        self.read_buffer
-            .extend_from_slice(&self.buffer[..bytes_read]);
-
-        let mut values = Vec::new();
-        let mut total_consumed = 0;
         loop {
-            let mut cursor = Cursor::new(&self.read_buffer[total_consumed..]);
-            let mut decoder = Decoder::new(BufReader::with_capacity(2, &mut cursor));
-
-            match decoder.decode() {
-                Ok(value) => {
-                    let bytes_consumed = cursor.position() as usize;
-                    total_consumed += bytes_consumed;
-                    values.push(value);
+            if !self.buffer.is_empty() {
+                let mut decoder = Decoder::new(BufReader::new(self.buffer.as_slice()));
+                match decoder.decode() {
+                    Ok(value) => {
+                        let consumed = value.encode().len();
+                        self.buffer.drain(..consumed);
+                        return Ok(value);
+                    }
+                    Err(e) if e.kind() == ErrorKind::UnexpectedEof => {
+                        // Need more data, continue reading
+                    }
+                    Err(e) => return Err(e.into()),
                 }
-                Err(_) => break, // Incomplete message, wait for more data
             }
-        }
 
-        if total_consumed > 0 {
-            self.read_buffer.advance(total_consumed);
-        }
+            let bytes_read = self.stream.read(&mut temp_buf).await?;
+            if bytes_read == 0 {
+                bail!("Connection closed")
+            }
 
-        Ok(Some(values))
+            self.buffer.extend_from_slice(&temp_buf[..bytes_read]);
+        }
     }
 
-    pub async fn read_value_with_timeout(&mut self, duration: Duration) -> Result<Option<Value>> {
-        match timeout(duration, self.read_value()).await {
-            Err(_) => Ok(None), // Timeout
-            Ok(Ok(value)) => Ok(value),
-            Ok(Err(e)) => Err(e),
+    async fn read_values(&mut self) -> Result<Vec<Value>> {
+        let mut temp_buf = vec![0; BUFFER_SIZE];
+        let mut values = Vec::new();
+
+        loop {
+            if !self.buffer.is_empty() {
+                let mut decoder = Decoder::new(BufReader::new(self.buffer.as_slice()));
+                let mut total_consumed = 0;
+
+                while let Ok(value) = decoder.decode() {
+                    values.push(value.clone());
+                    total_consumed += value.encode().len();
+                }
+
+                if total_consumed > 0 {
+                    self.buffer.drain(..total_consumed);
+                }
+
+                if !values.is_empty() {
+                    return Ok(values);
+                }
+            }
+
+            let bytes_read = self.stream.read(&mut temp_buf).await?;
+            if bytes_read == 0 {
+                if values.is_empty() {
+                    bail!("Connection closed")
+                }
+                return Ok(values);
+            }
+
+            self.buffer.extend_from_slice(&temp_buf[..bytes_read]);
         }
     }
 
@@ -138,15 +149,14 @@ impl Server {
     pub async fn handle_conn(&mut self) -> Result<()> {
         loop {
             let values = match self.conn.read_values().await {
-                Ok(Some(values)) => values,
-                Ok(None) => break,
+                Ok(values) => values,
                 Err(e) => {
                     eprintln!("Error reading from stream: {e}");
                     break;
                 }
             };
 
-            let mut response_buf = Vec::new();
+            let mut response_buf = Vec::with_capacity(values.len());
             for value in values {
                 match self.process(&value).await {
                     Ok(Some(response)) => response_buf.extend_from_slice(&response.encode()),
@@ -174,22 +184,18 @@ impl Server {
                 Command::Subscribe | Command::Unsubscribe | Command::Ping
             )
         {
-            bail!(RedisError::CommandWithoutSubscribe(command));
+            bail!(RedisError::CommandWithoutSubscribe(command))
         }
 
         // Transaction mode handling
         if matches!(self.mode, ClientMode::Transaction { .. }) {
             let response = match command {
                 Command::Exec => {
-                    // Take queued commands and exit transaction mode
-                    let commands = match std::mem::replace(&mut self.mode, ClientMode::Normal) {
-                        ClientMode::Transaction { queued_commands } => queued_commands,
-                        other => {
-                            // Should not happen, but restore state just in case
-                            self.mode = other;
-                            Vec::new()
-                        }
+                    let ClientMode::Transaction { queued_commands } = &mut self.mode else {
+                        bail!("Expected transaction mode")
                     };
+                    let commands = std::mem::take(queued_commands);
+                    self.mode = ClientMode::Normal;
                     let mut responses = Vec::with_capacity(commands.len());
                     for cmd in commands {
                         match Box::pin(self.process(&cmd)).await {
@@ -298,7 +304,7 @@ impl Server {
     // CONFIG GET parameter
     fn handle_config(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let cmd = unpack_bulk_string(&args[0])?;
         let cmd = Command::from_str(cmd)?;
@@ -352,7 +358,7 @@ impl Server {
     // KEYS pattern
     fn handle_keys(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let pattern = unpack_bulk_string(&args[0])?;
         let keys = self.config.store.keys(pattern)?;
@@ -362,7 +368,7 @@ impl Server {
     // LLEN key
     fn handle_llen(&self, args: &[Value]) -> Result<Value> {
         if args.is_empty() {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         Ok(Value::Integer(self.config.store.llen(key)?))
@@ -371,7 +377,7 @@ impl Server {
     // LRANGE key start stop
     fn handle_lrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 3 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         let start = unpack_bulk_string(&args[1])?.parse::<i64>()?;
@@ -401,7 +407,7 @@ impl Server {
     // PUBLISH channel message
     async fn handle_publish(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 2 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let channel = unpack_bulk_string(&args[0])?;
         let message = unpack_bulk_string(&args[1])?;
@@ -425,7 +431,7 @@ impl Server {
     // SUBSCRIBE channel [channel ...]
     async fn handle_subscribe(&mut self, args: &[Value]) -> Result<()> {
         if args.is_empty() {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let channels = args
@@ -494,7 +500,7 @@ impl Server {
                     }
                     read = self.conn.read_value() => {
                         match read {
-                            Ok(Some(value)) => {
+                            Ok(value) => {
                                 match Box::pin(self.process(&value)).await {
                                     Ok(Some(response)) => self.conn.write_value(&response).await?,
                                     Ok(None) => (),
@@ -504,7 +510,6 @@ impl Server {
                                     }
                                 }
                             }
-                            Ok(None) => break,
                             Err(e) => {
                                 eprintln!("Error reading from stream: {e}");
                                 break;
@@ -521,7 +526,7 @@ impl Server {
     // TYPE key
     fn handle_type(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         Ok(Value::Bulk(self.config.store.type_(key)))
@@ -566,40 +571,44 @@ impl Server {
 
     // WAIT numreplicas timeout
     async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
-        if args.len() != 2 {
-            bail!(RedisError::InvalidArgument);
-        }
-        let num_replicas = unpack_bulk_string(&args[0])?.parse::<usize>()?;
-        let timeout_ms = unpack_bulk_string(&args[1])?.parse::<u64>()?;
-
         if self.config.replication.get_num_commands() == 0 {
             return Ok(Value::Integer(self.config.replication.num_replicas() as i64));
         }
 
-        let repl_getack = Value::Array(vec![
+        if args.len() != 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+
+        let num_replicas: usize = unpack_bulk_string(&args[0])?.parse()?;
+        let timeout_ms: u64 = unpack_bulk_string(&args[1])?.parse()?;
+
+        // Ask all replicas to send ACKs.
+        self.config.replication.publish(Value::Array(vec![
             Value::Bulk("REPLCONF".into()),
             Value::Bulk("GETACK".into()),
             Value::Bulk("*".into()),
-        ]);
-        self.config.replication.publish(repl_getack);
+        ]));
 
-        let end_time = Instant::now() + Duration::from_millis(timeout_ms);
-        let num_ack = loop {
-            let curr_acks = self.config.replication.get_num_ack();
-            if Instant::now() >= end_time || curr_acks >= num_replicas {
-                break curr_acks;
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let mut num_ack;
+
+        loop {
+            num_ack = self.config.replication.get_num_ack();
+            if num_ack >= num_replicas || Instant::now() >= deadline {
+                break;
             }
             sleep(Duration::from_millis(50)).await;
-        };
+        }
 
         self.config.replication.reset();
+
         Ok(Value::Integer(num_ack as i64))
     }
 
     // XRANGE key start end
     fn handle_xrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 3 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -622,7 +631,7 @@ impl Server {
     // XREAD [BLOCK milliseconds] STREAMS key [key ...] id [id ...]
     async fn handle_xread(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let mut args_iter = args.iter();
@@ -644,7 +653,7 @@ impl Server {
 
         let stream_args = args_iter.collect::<Vec<_>>();
         if stream_args.len() % 2 != 0 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let mid = stream_args.len() / 2;
@@ -667,16 +676,14 @@ impl Server {
             Ok(Value::NullArray)
         } else {
             // Follow same stream order as input
-            let values = stream_keys
-                .iter()
-                .filter_map(|key| {
-                    unpack_bulk_string(key).ok().and_then(|key_str| {
-                        entries.get(key_str).map(|stream| {
-                            Value::Array(vec![
-                                Value::Bulk(key_str.to_string()),
-                                Value::Array(build_stream_entry_list(stream.clone())),
-                            ])
-                        })
+            let values = streams
+                .into_iter()
+                .filter_map(|(key, _)| {
+                    entries.get(key).map(|stream| {
+                        Value::Array(vec![
+                            Value::Bulk(key.to_string()),
+                            Value::Array(build_stream_entry_list(stream.clone())),
+                        ])
                     })
                 })
                 .collect();
@@ -687,7 +694,7 @@ impl Server {
     // ZCARD key
     fn handle_zcard(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 1 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         Ok(Value::Integer(self.config.store.zcard(key)?))
@@ -696,7 +703,7 @@ impl Server {
     // ZRANGE key start stop
     fn handle_zrange(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 3 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -716,7 +723,7 @@ impl Server {
     // ZRANK key member
     fn handle_zrank(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 2 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         let member = unpack_bulk_string(&args[1])?;
@@ -729,7 +736,7 @@ impl Server {
     // ZSCORE key member
     fn handle_zscore(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 2 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         let member = unpack_bulk_string(&args[1])?;
@@ -742,7 +749,7 @@ impl Server {
     // GEODIST key member1 member2
     fn handle_geodist(&self, args: &[Value]) -> Result<Value> {
         if args.len() < 3 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         let member1 = unpack_bulk_string(&args[1])?;
@@ -757,7 +764,7 @@ impl Server {
     // GEOPOS key [member [member ...]]
     fn handle_geopos(&self, args: &[Value]) -> Result<Value> {
         if args.is_empty() {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
 
         let key = unpack_bulk_string(&args[0])?;
@@ -784,7 +791,7 @@ impl Server {
     // GEOSEARCH key <FROMLONLAT longitude latitude> <BYRADIUS radius <M | KM |FT | MI>>
     fn handle_geosearch(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 7 {
-            bail!(RedisError::InvalidArgument);
+            bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
         let from_lon = unpack_bulk_string(&args[2])?.parse::<f64>()?;
@@ -863,7 +870,7 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
 // ECHO message
 fn handle_echo(args: &[Value]) -> Result<Value> {
     if args.is_empty() {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     } else {
         Ok(args[0].clone())
     }
@@ -872,7 +879,7 @@ fn handle_echo(args: &[Value]) -> Result<Value> {
 // SET key value [PX milliseconds]
 pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -900,11 +907,11 @@ pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
 // GET key
 pub fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     match store.get(key) {
-        Some(s) => Ok(Value::Bulk(s)),
+        Some(s) => Ok(Value::Bulk(s.to_string())),
         None => Ok(Value::Null),
     }
 }
@@ -912,7 +919,7 @@ pub fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
 // XADD key <* | id> field value [field value ...]
 pub fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
 
     let key = unpack_bulk_string(&args[0])?;
@@ -929,7 +936,7 @@ pub fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
         .collect::<Result<HashMap<_, _>>>()?;
 
     if values.is_empty() {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
 
     match store.add_stream_entry(key, entry_id, values) {
@@ -941,7 +948,7 @@ pub fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
 // INC key
 pub fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     let value = store.incr(key)?;
@@ -951,7 +958,7 @@ pub fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
 // RPUSH key element [element ...]
 pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     let elements = args[1..]
@@ -965,7 +972,7 @@ pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
 // LPOP key [count]
 pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
     if args.is_empty() {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     let count = if let Some(arg) = args.get(1) {
@@ -973,13 +980,13 @@ pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
             Value::Bulk(c) => {
                 let parsed = c.parse::<i64>()?;
                 if parsed < 0 {
-                    bail!(RedisError::InvalidInteger);
+                    bail!(RedisError::InvalidInteger)
                 }
                 Some(parsed as usize)
             }
             Value::Integer(c) => {
                 if *c < 0 {
-                    bail!(RedisError::InvalidInteger);
+                    bail!(RedisError::InvalidInteger)
                 }
                 Some(*c as usize)
             }
@@ -1003,7 +1010,7 @@ pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
 // LPUSH key element [element ...]
 pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     let elements = args[1..]
@@ -1017,7 +1024,7 @@ pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
 // BLPOP key [key ...] timeout
 pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
 
     let timeout = match args.last() {
@@ -1039,7 +1046,7 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
 
 // ZADD key score member [score member ...]
 pub fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 3 || (args.len() - 1) % 2 != 0 {
+    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         bail!(RedisError::InvalidArgument);
     }
     let key = unpack_bulk_string(&args[0])?;
@@ -1059,7 +1066,7 @@ pub fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
 // ZREM key member [member ...]
 pub fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
-        bail!(RedisError::InvalidArgument);
+        bail!(RedisError::InvalidArgument)
     }
     let key = unpack_bulk_string(&args[0])?;
     let members = args[1..]
@@ -1072,18 +1079,19 @@ pub fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
 
 // GEOADD key longitude latitude member [longitude latitude member ...]
 pub fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 4 || (args.len() - 1) % 3 != 0 {
-        bail!(RedisError::InvalidArgument);
+    let arg_len = args.len();
+    if arg_len < 4 || !(arg_len - 1).is_multiple_of(3) {
+        bail!(RedisError::InvalidArgument)
     }
-    let key = unpack_bulk_string(&args[0])?;
 
-    let mut parsed_entries = Vec::new();
+    let key = unpack_bulk_string(&args[0])?;
+    let mut parsed_entries = Vec::with_capacity((arg_len - 1) / 3);
     for chunk in args[1..].chunks(3) {
         let longitude = unpack_bulk_string(&chunk[0])?.parse::<f64>()?;
         let latitude = unpack_bulk_string(&chunk[1])?.parse::<f64>()?;
         let member = unpack_bulk_string(&chunk[2])?;
         if !is_valid_coordinate(latitude, longitude) {
-            bail!(RedisError::InvalidCoordinates(longitude, latitude));
+            bail!(RedisError::InvalidCoordinates(longitude, latitude))
         }
         parsed_entries.push((longitude, latitude, member));
     }

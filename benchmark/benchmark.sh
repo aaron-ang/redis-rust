@@ -1,31 +1,41 @@
 #!/bin/bash
+set -euo pipefail
 
-set -e
-
-# Check if in benchmark directory
-if [ "$(basename "$(pwd)")" != "benchmark" ]; then
-    cd benchmark/
-fi
+KEY_MAX="${KEY_MAX:-1699396}"
+TEST_TIME="${TEST_TIME:-60}"
+CLIENTS="${CLIENTS:-50}"
+THREADS="${THREADS:-6}"
+PIPELINE="${PIPELINE:-10}"
 
 RUST_PID=""
 
 cleanup() {
-    if [ -n "$RUST_PID" ] && kill -0 $RUST_PID 2>/dev/null; then
-        echo "Cleaning up Rust server (PID: $RUST_PID)..."
-        kill $RUST_PID 2>/dev/null || true
-        wait $RUST_PID 2>/dev/null || true
-        RUST_PID=""
+    if [[ -n "${RUST_PID}" ]] && kill -0 "${RUST_PID}" 2>/dev/null; then
+        echo "Cleaning up server (PID: ${RUST_PID})..."
+        kill "${RUST_PID}" 2>/dev/null || true
+        wait "${RUST_PID}" 2>/dev/null || true
     fi
+    RUST_PID=""
 }
 
-trap cleanup INT TERM
+trap cleanup INT TERM EXIT
+
+# Move into benchmark directory if not already there
+if [ "$(basename "$PWD")" != "benchmark" ]; then
+    if [ -d benchmark ]; then
+        cd benchmark || exit 1
+    else
+        echo "Error: benchmark directory not found"
+        exit 1
+    fi
+fi
 
 wait_for_server() {
-    echo "Waiting for server to be ready..."
+    echo "Waiting for Redis..."
     for i in {1..30}; do
         if redis-cli ping >/dev/null 2>&1; then
-            echo "Server is ready!"
-            return 0
+        echo "Server is ready!"
+        return 0
         fi
         sleep 1
     done
@@ -39,63 +49,62 @@ flush_db() {
 }
 
 load_data() {
-    flush_db
     local prefix=$1
-    echo "Loading data for $prefix..."
+    flush_db
+    echo "Loading data for ${prefix}..."
     memtier_benchmark \
         --ipv4 \
         --hide-histogram \
-        --pipeline=10 \
-        --clients=50 \
-        --threads=6 \
-        --key-maximum=1699396 \
+        --pipeline="${PIPELINE}" \
+        --clients="${CLIENTS}" \
+        --threads="${THREADS}" \
+        --key-maximum="${KEY_MAX}" \
         --ratio=1:0 \
         --data-size=1024 \
-        -n allkeys \
-        --key-pattern=P:P
-    
-    # Wait for server to finish processing all queued commands
+        --key-pattern=P:P \
+        -n allkeys
+
     echo "Waiting for data processing to complete..."
     sleep 5
-    
-    # Verify data was loaded
-    local dbsize=$(redis-cli dbsize)
-    echo "Database size: $dbsize"
-    if [ "$dbsize" -lt 1699396 ]; then
-        echo "Expected 1,699,396 keys but only got $dbsize"
+
+    local dbsize
+    dbsize=$(redis-cli dbsize)
+    echo "Database size: ${dbsize}"
+    if [[ "${dbsize}" -lt "${KEY_MAX}" ]]; then
+        echo "Expected ${KEY_MAX} keys but only got ${dbsize}"
         exit 1
     fi
-}
+    }
 
-run_throughput_benchmark() {
+    run_throughput_benchmark() {
     local prefix=$1
-    echo "Running throughput benchmark for $prefix..."
+    echo "Running throughput benchmark for ${prefix}..."
     memtier_benchmark \
         --ipv4 \
-        --pipeline=10 \
-        --clients=50 \
-        --threads=6 \
-        --key-maximum=1699396 \
+        --pipeline="${PIPELINE}" \
+        --clients="${CLIENTS}" \
+        --threads="${THREADS}" \
+        --key-maximum="${KEY_MAX}" \
         --ratio=0:1 \
         --data-size=1024 \
         --distinct-client-seed \
-        --test-time 60
+        --test-time "${TEST_TIME}"
 }
 
 run_latency_benchmark() {
     local prefix=$1
-    echo "Running latency benchmark for $prefix..."
+    mkdir -p out
+    echo "Running latency benchmark for ${prefix}..."
     memtier_benchmark \
         --ipv4 \
-        --key-maximum=1699396 \
+        --key-maximum="${KEY_MAX}" \
         --ratio=0:1 \
         --data-size=1024 \
         --distinct-client-seed \
-        --test-time 60 \
-        --hdr-file-prefix="out/$prefix"
+        --test-time "${TEST_TIME}" \
+        --hdr-file-prefix="out/${prefix}"
 }
 
-### Benchmark 1 (Rust implementation)
 echo "=== Benchmark 1: Rust Implementation ==="
 cargo run --release >/dev/null 2>&1 &
 RUST_PID=$!
@@ -106,12 +115,10 @@ run_throughput_benchmark "redis-rs"
 run_latency_benchmark "redis-rs"
 cleanup
 
-### Benchmark 2 (baseline)
 echo "=== Benchmark 2: Redis Baseline ==="
-redis-server >/dev/null 2>&1 &
+redis-server --save "" >/dev/null 2>&1 &
 RUST_PID=$!
 wait_for_server
-redis-cli config set save "" # turn off persistence
 
 load_data "baseline"
 run_throughput_benchmark "baseline"

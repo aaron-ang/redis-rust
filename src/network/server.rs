@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{bail, Result};
 use base64::prelude::*;
+use bytes::{Buf, BytesMut};
 use resp::{Decoder, Value};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -41,7 +42,7 @@ enum ClientMode {
 pub struct Connection {
     stream: TcpStream,
     buffer: Vec<u8>,
-    read_buffer: Vec<u8>,
+    read_buffer: BytesMut,
 }
 
 impl Connection {
@@ -49,7 +50,7 @@ impl Connection {
         Connection {
             stream,
             buffer: vec![0; 1024],
-            read_buffer: Vec::new(),
+            read_buffer: BytesMut::with_capacity(4096),
         }
     }
 
@@ -73,24 +74,23 @@ impl Connection {
             .extend_from_slice(&self.buffer[..bytes_read]);
 
         let mut values = Vec::new();
-        let mut offset = 0;
-
+        let mut total_consumed = 0;
         loop {
-            let mut cursor = Cursor::new(&self.read_buffer[offset..]);
-            // Use minimal buffer to prevent read-ahead
-            let mut decoder = Decoder::new(BufReader::with_capacity(1, &mut cursor));
+            let mut cursor = Cursor::new(&self.read_buffer[total_consumed..]);
+            let mut decoder = Decoder::new(BufReader::with_capacity(2, &mut cursor));
 
             match decoder.decode() {
                 Ok(value) => {
-                    offset += cursor.position() as usize;
+                    let bytes_consumed = cursor.position() as usize;
+                    total_consumed += bytes_consumed;
                     values.push(value);
                 }
-                Err(_) => break,
+                Err(_) => break, // Incomplete message, wait for more data
             }
         }
 
-        if offset > 0 {
-            self.read_buffer.drain(..offset);
+        if total_consumed > 0 {
+            self.read_buffer.advance(total_consumed);
         }
 
         Ok(Some(values))

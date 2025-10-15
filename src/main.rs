@@ -16,27 +16,30 @@ const PORT: u16 = 6379;
 #[command(version, about, long_about = None)]
 struct Args {
     #[arg(long, default_value_t = PORT)]
-    port: u16,
+    port: u16, // which tcp port to bind to (default 6379)
 
     #[arg(long)]
-    replicaof: Option<String>,
+    replicaof: Option<String>, // if set this node acts as a replica of another
 
     #[arg(long)]
-    dir: Option<PathBuf>,
+    dir: Option<PathBuf>, // directory for database persistence
 
     #[arg(long)]
-    dbfilename: Option<String>,
+    dbfilename: Option<String>, // the name of the database file
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = setup_config().await?;
+    let config = setup_config().await?; // reads the args > builds the store > determines the
+    // role( leader, or follower)
 
+
+    // starting the tcp server
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
     let listener = TcpListener::bind(addr).await?;
 
     println!("Server listening on {addr}");
-
+    // this likely starts some bg task to sync data from the leader
     if let ReplicaType::Follower = config.role {
         if let Some(replicaof) = &config.replicaof {
             spawn_follower_connection(replicaof, config.clone()).await?;
@@ -99,7 +102,7 @@ fn parse_replica_string(replicaof: &str) -> Result<(String, u16)> {
         (Some(host), Some(port_str)) => port_str
             .parse::<u16>()
             .map_err(|e| anyhow::anyhow!("Invalid port. {e}"))
-            .map(|port| (host.to_string(), port)),
-        _ => bail!("Invalid replicaof format"),
-    }
+            .map(|port|(host.to_string(), port)),
+            bail!("Invalid replicaof format"),
+}
 }

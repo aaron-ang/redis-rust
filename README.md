@@ -20,7 +20,7 @@ This Redis implementation has been benchmarked against the official Redis server
 - **Connections**: 50 per thread (300 total)
 - **Pipeline**: 10 commands
 - **Data Size**: 1024 bytes
-- **Key Space**: ~1.7M keys  
+- **Key Space**: ~1.7M keys (~3GB)
 - **Operation**: GET only
 
 ### Results

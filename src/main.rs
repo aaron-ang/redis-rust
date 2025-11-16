@@ -1,7 +1,6 @@
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
-    sync::Arc,
 };
 
 use anyhow::{bail, Result};
@@ -58,7 +57,7 @@ async fn main() -> Result<()> {
 
 async fn setup_config() -> Result<Config> {
     let args = Args::parse();
-    let store = Arc::new(Store::from_path(&args.dir, &args.dbfilename)?);
+    let store = Store::from_path(&args.dir, &args.dbfilename)?;
     let role = determine_role(&args);
 
     Ok(Config::new(

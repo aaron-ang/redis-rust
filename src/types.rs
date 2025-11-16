@@ -206,14 +206,14 @@ impl FromStr for XReadBlockType {
 pub struct Instance {
     _version: [u8; 4],
     _metadata: HashMap<StringRecord, StringRecord>,
-    databases: HashMap<usize, Store>,
+    databases: HashMap<usize, Arc<Store>>,
     _checksum: [u8; 8],
 }
 
 struct InstanceBuilder {
     version: [u8; 4],
     metadata: HashMap<StringRecord, StringRecord>,
-    databases: HashMap<usize, Store>,
+    databases: HashMap<usize, Arc<Store>>,
     checksum: [u8; 8],
 }
 
@@ -273,7 +273,7 @@ impl Instance {
                 }
                 SectionId::Database => {
                     let (index, store) = Self::read_database(buf)?;
-                    builder.databases.insert(index, store);
+                    builder.databases.insert(index, store.to_shared());
                 }
                 SectionId::EndOfFile => {
                     buf.read_exact(&mut builder.checksum)?;
@@ -319,9 +319,10 @@ impl Instance {
         Ok((key, RedisData::new(RecordType::String(value), expires_on)))
     }
 
-    pub fn get_db(&self, index: usize) -> Result<&Store> {
+    pub fn get_db(&self, index: usize) -> Result<Arc<Store>> {
         self.databases
             .get(&index)
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Database not found"))
     }
 }

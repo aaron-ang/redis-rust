@@ -11,7 +11,7 @@ use dashmap::DashMap;
 use futures::future::select_all;
 use glob::Pattern;
 use tokio::{
-    sync::{mpsc, oneshot, RwLock},
+    sync::{mpsc, oneshot},
     time::{self, Duration, Instant},
 };
 
@@ -60,39 +60,38 @@ impl RedisData {
     }
 }
 
-#[derive(Clone)]
+#[derive(Default)]
 pub struct Store {
     entries: Arc<DashMap<String, RedisData>>,
-    list_waiters: Arc<RwLock<HashMap<String, VecDeque<oneshot::Sender<()>>>>>,
+    list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>>>,
 }
 
 impl Store {
-    pub fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Self> {
+    pub fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Arc<Self>> {
         if let (Some(dir), Some(filename)) = (dir, dbfilename) {
             let path = dir.join(filename);
             if path.exists() {
                 let file = fs::File::open(&path)?;
                 let instance = Instance::new(file)?;
-                return instance.get_db(0).cloned();
+                return instance.get_db(0);
             }
         }
-        Self::empty()
-    }
-
-    fn empty() -> Result<Self> {
-        Ok(Store::new_with_entries(HashMap::new()))
+        Ok(Self::default().to_shared())
     }
 
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
             entries: Arc::new(DashMap::from_iter(entries)),
-            list_waiters: Arc::new(RwLock::new(HashMap::new())),
+            list_waiters: Arc::new(DashMap::new()),
         }
     }
 
+    pub fn to_shared(self) -> Arc<Self> {
+        Arc::new(self)
+    }
+
     async fn notify_list_waiters(&self, key: &str) {
-        let mut waiters = self.list_waiters.write().await;
-        let Some(wait_queue) = waiters.get_mut(key) else {
+        let Some(mut wait_queue) = self.list_waiters.get_mut(key) else {
             return;
         };
         // Notify the first waiter
@@ -180,13 +179,13 @@ impl Store {
 
             // 2. Register a waiter for each key
             let mut receivers = Vec::with_capacity(keys.len());
-            {
-                let mut waiters = self.list_waiters.write().await;
-                for key in keys {
-                    let (tx, rx) = oneshot::channel();
-                    waiters.entry(key.to_string()).or_default().push_back(tx);
-                    receivers.push(rx);
-                }
+            for key in keys {
+                let (tx, rx) = oneshot::channel();
+                self.list_waiters
+                    .entry(key.to_string())
+                    .or_default()
+                    .push_back(tx);
+                receivers.push(rx);
             }
 
             // 3. Wait for a notification or timeout

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use resp::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -10,7 +8,7 @@ async fn setup_test_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let port = addr.port();
-    let store = Arc::new(Store::from_path(&None, &None).unwrap());
+    let store = Store::from_path(&None, &None).unwrap();
 
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {

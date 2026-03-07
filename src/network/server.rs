@@ -224,6 +224,7 @@ impl Server {
         }
 
         let response = match command {
+            Command::Acl => Some(self.handle_acl(args)?),
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
             Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
@@ -299,6 +300,21 @@ impl Server {
         }
 
         Ok(response)
+    }
+
+    // ACL subcommand
+    fn handle_acl(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument)
+        }
+        let subcommand = unpack_bulk_string(&args[0])?;
+        if subcommand.eq_ignore_ascii_case("WHOAMI") {
+            return Ok(Value::Bulk("default".into()));
+        }
+        bail!(RedisError::UnknownCommand(
+            format!("ACL {subcommand}"),
+            QuotedArgs(vec![subcommand.to_string()])
+        ))
     }
 
     // CONFIG GET parameter
@@ -529,7 +545,7 @@ impl Server {
             bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
-        Ok(Value::Bulk(self.config.store.type_(key)))
+        Ok(Value::String(self.config.store.type_(key).into()))
     }
 
     // UNSUBSCRIBE [channel [channel ...]]

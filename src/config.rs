@@ -1,10 +1,18 @@
 use std::{path::PathBuf, sync::Arc};
 
+use dashmap::DashMap;
+
 use crate::data::Store;
 use crate::network::{PubSub, ReplicaType, ReplicationHub};
 
 const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILE: &str = "dump.rdb";
+
+#[derive(Clone, Default)]
+pub struct AclUser {
+    pub flags: Vec<String>,
+    pub passwords: Vec<String>,
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -16,6 +24,7 @@ pub struct Config {
     pub store: Arc<Store>,
     pub replication: Arc<ReplicationHub>,
     pub pubsub: Arc<PubSub>,
+    pub acl_users: Arc<DashMap<String, AclUser>>,
 }
 
 impl Config {
@@ -27,6 +36,14 @@ impl Config {
         role: ReplicaType,
         replicaof: Option<String>,
     ) -> Self {
+        let acl_users = Arc::new(DashMap::new());
+        acl_users.insert(
+            "default".to_string(),
+            AclUser {
+                flags: vec!["nopass".to_string()],
+                passwords: vec![],
+            },
+        );
         Config {
             port,
             dir: dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),
@@ -36,6 +53,7 @@ impl Config {
             replicaof,
             replication: Arc::new(ReplicationHub::default()),
             pubsub: Arc::new(PubSub::default()),
+            acl_users,
         }
     }
 }

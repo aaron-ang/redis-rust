@@ -8,6 +8,7 @@ use std::{
 use anyhow::{bail, Result};
 use base64::prelude::*;
 use resp::{Decoder, Value};
+use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -308,28 +309,60 @@ impl Server {
             bail!(RedisError::InvalidArgument)
         }
         let subcommand = unpack_bulk_string(&args[0])?;
-        if subcommand.eq_ignore_ascii_case("WHOAMI") {
-            return Ok(Value::Bulk("default".into()));
-        }
-        if subcommand.eq_ignore_ascii_case("GETUSER") {
-            if args.len() < 2 {
-                bail!(RedisError::InvalidArgument)
+        match subcommand.to_lowercase().as_str() {
+            "whoami" => Ok(Value::Bulk("default".into())),
+            "getuser" => {
+                if args.len() < 2 {
+                    bail!(RedisError::InvalidArgument)
+                }
+                let username = unpack_bulk_string(&args[1])?;
+                if let Some(user) = self.config.acl_users.get(username) {
+                    let flags: Vec<Value> = user
+                        .flags
+                        .iter()
+                        .map(|s| Value::Bulk(s.clone().into()))
+                        .collect();
+                    let passwords: Vec<Value> = user
+                        .passwords
+                        .iter()
+                        .map(|s| Value::Bulk(s.clone().into()))
+                        .collect();
+                    Ok(Value::Array(vec![
+                        Value::Bulk("flags".into()),
+                        Value::Array(flags),
+                        Value::Bulk("passwords".into()),
+                        Value::Array(passwords),
+                    ]))
+                } else {
+                    Ok(Value::Null)
+                }
             }
-            let username = unpack_bulk_string(&args[1])?;
-            if username.eq_ignore_ascii_case("default") {
-                return Ok(Value::Array(vec![
-                    Value::Bulk("flags".into()),
-                    Value::Array(vec![Value::Bulk("nopass".into())]),
-                    Value::Bulk("passwords".into()),
-                    Value::Array(vec![]),
-                ]));
+            "setuser" => {
+                if args.len() < 2 {
+                    bail!(RedisError::InvalidArgument)
+                }
+                let username = unpack_bulk_string(&args[1])?.to_string();
+                let mut user = self
+                    .config
+                    .acl_users
+                    .get_mut(&username)
+                    .ok_or_else(|| anyhow::anyhow!("ERR User '{username}' does not exist"))?;
+                for rule in args.iter().skip(2) {
+                    let rule_str = unpack_bulk_string(rule)?;
+                    if let Some(password) = rule_str.strip_prefix('>') {
+                        let hash = Sha256::digest(password.as_bytes());
+                        let hex_hash = format!("{:x}", hash);
+                        user.passwords.push(hex_hash);
+                        user.flags.retain(|f| f != "nopass");
+                    }
+                }
+                Ok(Value::String("OK".into()))
             }
-            return Ok(Value::Null);
+            _ => bail!(RedisError::UnknownCommand(
+                format!("ACL {subcommand}"),
+                QuotedArgs(vec![subcommand.to_string()])
+            )),
         }
-        bail!(RedisError::UnknownCommand(
-            format!("ACL {subcommand}"),
-            QuotedArgs(vec![subcommand.to_string()])
-        ))
     }
 
     // CONFIG GET parameter

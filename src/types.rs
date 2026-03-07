@@ -28,6 +28,7 @@ const MAGIC: &str = "REDIS";
 #[strum(ascii_case_insensitive, serialize_all = "UPPERCASE")]
 pub enum Command {
     Acl,
+    Auth,
     BLPop,
     #[strum(serialize = "COMMAND")]
     Cmd,

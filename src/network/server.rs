@@ -226,6 +226,7 @@ impl Server {
 
         let response = match command {
             Command::Acl => Some(self.handle_acl(args)?),
+            Command::Auth => Some(self.handle_auth(args)?),
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
             Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
@@ -362,6 +363,28 @@ impl Server {
                 format!("ACL {subcommand}"),
                 QuotedArgs(vec![subcommand.to_string()])
             )),
+        }
+    }
+
+    // AUTH [username] password
+    fn handle_auth(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+        let username = unpack_bulk_string(&args[0])?;
+        let password = unpack_bulk_string(&args[1])?;
+        let user = self.config.acl_users.get(username).ok_or_else(|| {
+            anyhow::anyhow!("WRONGPASS invalid username-password pair or user is disabled.")
+        })?;
+        if user.flags.iter().any(|f| f == "nopass") {
+            return Ok(Value::String("OK".into()));
+        }
+        let hash = Sha256::digest(password.as_bytes());
+        let hex_hash = format!("{:x}", hash);
+        if user.passwords.iter().any(|p| p == &hex_hash) {
+            Ok(Value::String("OK".into()))
+        } else {
+            bail!("WRONGPASS invalid username-password pair or user is disabled.")
         }
     }
 

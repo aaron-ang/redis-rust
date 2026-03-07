@@ -319,10 +319,10 @@ impl Server {
             if username.eq_ignore_ascii_case("default") {
                 return Ok(Value::Array(vec![
                     Value::Bulk("flags".into()),
-                    Value::Array(vec![]),
+                    Value::Array(vec![Value::Bulk("nopass".into())]),
                 ]));
             }
-            bail!("ERR User '{username}' does not exist")
+            return Ok(Value::Null);
         }
         bail!(RedisError::UnknownCommand(
             format!("ACL {subcommand}"),

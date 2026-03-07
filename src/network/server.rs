@@ -311,6 +311,19 @@ impl Server {
         if subcommand.eq_ignore_ascii_case("WHOAMI") {
             return Ok(Value::Bulk("default".into()));
         }
+        if subcommand.eq_ignore_ascii_case("GETUSER") {
+            if args.len() < 2 {
+                bail!(RedisError::InvalidArgument)
+            }
+            let username = unpack_bulk_string(&args[1])?;
+            if username.eq_ignore_ascii_case("default") {
+                return Ok(Value::Array(vec![
+                    Value::Bulk("flags".into()),
+                    Value::Array(vec![]),
+                ]));
+            }
+            bail!("ERR User '{username}' does not exist")
+        }
         bail!(RedisError::UnknownCommand(
             format!("ACL {subcommand}"),
             QuotedArgs(vec![subcommand.to_string()])

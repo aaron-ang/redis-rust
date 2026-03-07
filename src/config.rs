@@ -8,9 +8,47 @@ use crate::network::{PubSub, ReplicaType, ReplicationHub};
 const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILE: &str = "dump.rdb";
 
+/// Flag names by index; index i uses bit (1 << i). Index 0 reserved (empty).
+const FLAG_NAMES: &[&str] = &["", "nopass"];
+
+#[derive(Clone, Copy, Default)]
+pub struct AclFlags(u8);
+
+impl AclFlags {
+    pub fn nopass() -> Self {
+        let i = FLAG_NAMES.iter().position(|&n| n == "nopass").unwrap();
+        AclFlags(1 << i)
+    }
+
+    pub fn contains(&self, name: &str) -> bool {
+        FLAG_NAMES
+            .iter()
+            .position(|&n| n == name)
+            .map_or(false, |i| self.0 & (1 << i) != 0)
+    }
+
+    pub fn set(&mut self, name: &str, on: bool) {
+        if let Some(i) = FLAG_NAMES.iter().position(|&n| n == name) {
+            let bit = 1 << i;
+            if on {
+                self.0 |= bit;
+            } else {
+                self.0 &= !bit;
+            }
+        }
+    }
+
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        let bits = self.0;
+        (1..FLAG_NAMES.len())
+            .filter(move |&i| bits & (1 << i) != 0)
+            .map(|i| FLAG_NAMES[i])
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct AclUser {
-    pub flags: Vec<String>,
+    pub flags: AclFlags,
     pub passwords: Vec<String>,
 }
 
@@ -40,7 +78,7 @@ impl Config {
         acl_users.insert(
             "default".to_string(),
             AclUser {
-                flags: vec!["nopass".to_string()],
+                flags: AclFlags::nopass(),
                 passwords: vec![],
             },
         );

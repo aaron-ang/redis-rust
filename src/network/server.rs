@@ -136,14 +136,20 @@ pub struct Server {
     config: Config,
     conn: Connection,
     mode: ClientMode,
+    authenticated: bool,
 }
 
 impl Server {
     pub fn new(config: Config, stream: TcpStream) -> Self {
+        let authenticated = config
+            .acl_users
+            .get("default")
+            .map_or(false, |user| user.flags.contains("nopass"));
         Server {
             config,
             conn: Connection::new(stream),
             mode: ClientMode::Normal,
+            authenticated,
         }
     }
 
@@ -178,6 +184,10 @@ impl Server {
 
     pub async fn process(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
         let (command, args) = extract_command(cmd_line)?;
+
+        if !self.authenticated && command != Command::Auth {
+            bail!("NOAUTH Authentication required.")
+        }
 
         if matches!(self.mode, ClientMode::Subscribed { .. })
             && !matches!(
@@ -318,11 +328,8 @@ impl Server {
                 }
                 let username = unpack_bulk_string(&args[1])?;
                 if let Some(user) = self.config.acl_users.get(username) {
-                    let flags: Vec<Value> = user
-                        .flags
-                        .iter()
-                        .map(|s| Value::Bulk(s.clone().into()))
-                        .collect();
+                    let flags: Vec<Value> =
+                        user.flags.names().map(|s| Value::Bulk(s.into())).collect();
                     let passwords: Vec<Value> = user
                         .passwords
                         .iter()
@@ -354,7 +361,7 @@ impl Server {
                         let hash = Sha256::digest(password.as_bytes());
                         let hex_hash = format!("{:x}", hash);
                         user.passwords.push(hex_hash);
-                        user.flags.retain(|f| f != "nopass");
+                        user.flags.set("nopass", false);
                     }
                 }
                 Ok(Value::String("OK".into()))
@@ -367,7 +374,7 @@ impl Server {
     }
 
     // AUTH [username] password
-    fn handle_auth(&self, args: &[Value]) -> Result<Value> {
+    fn handle_auth(&mut self, args: &[Value]) -> Result<Value> {
         if args.len() < 2 {
             bail!(RedisError::InvalidArgument)
         }
@@ -376,12 +383,15 @@ impl Server {
         let user = self.config.acl_users.get(username).ok_or_else(|| {
             anyhow::anyhow!("WRONGPASS invalid username-password pair or user is disabled.")
         })?;
-        if user.flags.iter().any(|f| f == "nopass") {
-            return Ok(Value::String("OK".into()));
-        }
-        let hash = Sha256::digest(password.as_bytes());
-        let hex_hash = format!("{:x}", hash);
-        if user.passwords.iter().any(|p| p == &hex_hash) {
+        let password_ok = if user.flags.contains("nopass") {
+            true
+        } else {
+            let hash = Sha256::digest(password.as_bytes());
+            let hex_hash = format!("{:x}", hash);
+            user.passwords.iter().any(|p| p == &hex_hash)
+        };
+        if password_ok {
+            self.authenticated = true;
             Ok(Value::String("OK".into()))
         } else {
             bail!("WRONGPASS invalid username-password pair or user is disabled.")

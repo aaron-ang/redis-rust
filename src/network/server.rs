@@ -320,6 +320,8 @@ impl Server {
                 return Ok(Value::Array(vec![
                     Value::Bulk("flags".into()),
                     Value::Array(vec![Value::Bulk("nopass".into())]),
+                    Value::Bulk("passwords".into()),
+                    Value::Array(vec![]),
                 ]));
             }
             return Ok(Value::Null);

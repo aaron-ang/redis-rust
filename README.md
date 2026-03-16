@@ -42,7 +42,7 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ### Results
 
-![Latency by Percentile Distribution](benchmark/latency_distribution.png)
+![Latency by Percentile Distribution](benches/latency_distribution.png)
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
 | ----------------------- | --------- | -------- | -------- | ---------- | -------- |
@@ -55,24 +55,24 @@ This Redis implementation has been benchmarked against the official Redis server
 To run the benchmarks yourself:
 
 ```bash
-./benchmark/benchmark.sh
+./benches/benchmark.sh
 ```
 
 The script will:
 1. Run **throughput benchmarks** against both Redis baseline and Rust implementation
 2. Run **latency benchmarks** against both implementations
 3. Generate HDR histogram files for detailed latency analysis
-4. Output results to the `benchmark/out/` directory
+4. Output results to the `benches/out/` directory
 
 Generate plots of the latency results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
 
 ## Flamegraphs
 
 ### Rust Implementation
-![Rust Implementation Flamegraph](benchmark/flamegraph-rs.svg)
+![Rust Implementation Flamegraph](benches/flamegraph-rs.svg)
 
 ### Baseline
-![Baseline Flamegraph](benchmark/flamegraph-redis-server.svg)
+![Baseline Flamegraph](benches/flamegraph-redis-server.svg)
 
 ### Prerequisites
 

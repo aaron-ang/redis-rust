@@ -5,6 +5,7 @@ authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2021"
 
 [dependencies]
+ahash = "0.8.12"
 anyhow = "1.0.100"
 base64 = "0.22.1"
 byteorder = "1.5.0"
@@ -13,6 +14,7 @@ clap = { version = "4.5.60", features = ["derive"] }
 dashmap = "6.1.0"
 futures = "0.3.32"
 glob = "0.3.3"
+itoa = "1.0.18"
 ordered-float = "5.1.0"
 resp = "1.0.3"
 sha2 = "0.10.9"

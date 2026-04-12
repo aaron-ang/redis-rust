@@ -42,7 +42,7 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ### Results
 
-![Latency by Percentile Distribution](assets/latency_distribution.png)
+![Latency by Percentile Distribution](assets/latency.png)
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
 | ----------------------- | --------- | -------- | -------- | ---------- | -------- |
@@ -64,8 +64,7 @@ The script will:
 2. Run **latency benchmarks** against both implementations
 3. Generate HDR histogram files for detailed latency analysis
 4. Output results to the `benches/out/` directory
-
-Generate plots of the latency results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
+5. Generate the latency percentile chart at `assets/latency.png`
 
 ## Flamegraphs
 

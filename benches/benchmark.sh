@@ -117,4 +117,10 @@ run_throughput_benchmark "baseline"
 run_latency_benchmark "baseline"
 cleanup
 
+echo "=== Generating latency chart ==="
+uv run "$SCRIPT_DIR/plot_latency.py" \
+    out/redis-rs_FULL_RUN_1.txt \
+    out/baseline_FULL_RUN_1.txt \
+    -o ../assets/latency.png
+
 echo "Benchmark completed!"

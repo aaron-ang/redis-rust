@@ -281,6 +281,7 @@ impl Server {
             Command::Subscribe => self.handle_subscribe(args).await?,
             Command::Type => Some(self.handle_type(args)?),
             Command::Unsubscribe => self.handle_unsubscribe(args).await?,
+            Command::Unwatch => Some(self.handle_unwatch()),
             Command::Wait => Some(self.handle_wait(args).await?),
             Command::Watch => Some(self.handle_watch(args)?),
             Command::XAdd => Some(handle_xadd(args, &self.config.store)?),
@@ -684,6 +685,12 @@ impl Server {
         self.mode = ClientMode::Transaction {
             queued_commands: Vec::new(),
         };
+        Value::String("OK".into())
+    }
+
+    // UNWATCH
+    fn handle_unwatch(&mut self) -> Value {
+        self.watched_keys.clear();
         Value::String("OK".into())
     }
 

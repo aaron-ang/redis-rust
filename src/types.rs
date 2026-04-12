@@ -60,6 +60,7 @@ pub enum Command {
     Subscribe,
     Type,
     Unsubscribe,
+    Unwatch,
     Wait,
     Watch,
     XAdd,

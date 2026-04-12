@@ -134,6 +134,8 @@ pub enum RedisError {
     CommandWithoutSubscribe(Command),
     #[error("ERR invalid longitude,latitude pair {0},{1}")]
     InvalidCoordinates(f64, f64),
+    #[error("ERR WATCH inside MULTI is not allowed")]
+    WatchInsideMulti,
 }
 
 // ============================================================================

@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{BufReader, ErrorKind},
     str::FromStr,
     time::SystemTime,
@@ -137,6 +137,7 @@ pub struct Server {
     conn: Connection,
     mode: ClientMode,
     authenticated: bool,
+    watched_keys: HashSet<String>,
 }
 
 impl Server {
@@ -150,6 +151,7 @@ impl Server {
             conn: Connection::new(stream),
             mode: ClientMode::Normal,
             authenticated,
+            watched_keys: HashSet::new(),
         }
     }
 
@@ -224,6 +226,7 @@ impl Server {
                     self.mode = ClientMode::Normal;
                     Some(Value::String("OK".into()))
                 }
+                Command::Watch => bail!(RedisError::WatchInsideMulti),
                 _ => {
                     if let ClientMode::Transaction { queued_commands } = &mut self.mode {
                         queued_commands.push(cmd_line.clone());
@@ -257,42 +260,18 @@ impl Server {
             Command::LPop => Some(handle_lpop(args, &self.config.store)?),
             Command::LPush => Some(handle_lpush(args, &self.config.store).await?),
             Command::LRange => Some(self.handle_lrange(args)?),
-            Command::Multi => {
-                self.mode = ClientMode::Transaction {
-                    queued_commands: Vec::new(),
-                };
-                Some(Value::String("OK".into()))
-            }
+            Command::Multi => Some(self.handle_multi()),
             Command::Ping => Some(self.handle_ping(args)),
             Command::Publish => Some(self.handle_publish(args).await?),
-            Command::PSync => {
-                if let Err(e) = self.handle_psync().await {
-                    eprintln!("Error handling PSYNC: {e:?}");
-                }
-                None
-            }
+            Command::PSync => self.handle_psync().await?,
             Command::ReplConf => Some(Value::String("OK".into())),
             Command::RPush => Some(handle_rpush(args, &self.config.store).await?),
             Command::Set => Some(handle_set(args, &self.config.store)?),
-            Command::Subscribe => {
-                self.handle_subscribe(args).await?;
-                None
-            }
+            Command::Subscribe => self.handle_subscribe(args).await?,
             Command::Type => Some(self.handle_type(args)?),
-            Command::Unsubscribe => {
-                if !matches!(self.mode, ClientMode::Subscribed { .. }) {
-                    Some(Value::Array(vec![
-                        Value::Bulk("unsubscribe".into()),
-                        Value::Null,
-                        Value::Integer(0),
-                    ]))
-                } else {
-                    self.handle_unsubscribe(args).await?;
-                    None
-                }
-            }
+            Command::Unsubscribe => self.handle_unsubscribe(args).await?,
             Command::Wait => Some(self.handle_wait(args).await?),
-            Command::Watch => Some(Value::String("OK".into())),
+            Command::Watch => Some(self.handle_watch(args)?),
             Command::XAdd => Some(handle_xadd(args, &self.config.store)?),
             Command::XRange => Some(self.handle_xrange(args)?),
             Command::XRead => Some(self.handle_xread(args).await?),
@@ -514,7 +493,7 @@ impl Server {
     }
 
     // PSYNC replicationid offset
-    async fn handle_psync(&mut self) -> Result<()> {
+    async fn handle_psync(&mut self) -> Result<Option<Value>> {
         let msg = Value::String(format!("FULLRESYNC {REPL_ID} {REPL_OFFSET}"));
         let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
         let rdb_msg = format!("${}\r\n", rdb.len());
@@ -523,11 +502,12 @@ impl Server {
         self.conn.write_all(rdb_msg.as_bytes()).await?;
         self.conn.write_all(&rdb).await?;
         self.conn.flush().await?;
-        self.config.replication.run_replica(&mut self.conn).await
+        self.config.replication.run_replica(&mut self.conn).await?;
+        Ok(None)
     }
 
     // SUBSCRIBE channel [channel ...]
-    async fn handle_subscribe(&mut self, args: &[Value]) -> Result<()> {
+    async fn handle_subscribe(&mut self, args: &[Value]) -> Result<Option<Value>> {
         if args.is_empty() {
             bail!(RedisError::InvalidArgument)
         }
@@ -618,7 +598,7 @@ impl Server {
             }
         }
 
-        Ok(())
+        Ok(None)
     }
 
     // TYPE key
@@ -631,16 +611,22 @@ impl Server {
     }
 
     // UNSUBSCRIBE [channel [channel ...]]
-    async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<()> {
+    async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<Option<Value>> {
+        let forwarders = match &mut self.mode {
+            ClientMode::Subscribed { forwarders, .. } => forwarders,
+            _ => {
+                return Ok(Some(Value::Array(vec![
+                    Value::Bulk("unsubscribe".into()),
+                    Value::Null,
+                    Value::Integer(0),
+                ])));
+            }
+        };
+
         let channels = args
             .iter()
             .map(unpack_bulk_string)
             .collect::<Result<Vec<_>>>()?;
-
-        let forwarders = match &mut self.mode {
-            ClientMode::Subscribed { forwarders, .. } => forwarders,
-            _ => return Ok(()),
-        };
 
         let target_channels: Vec<String> = if channels.is_empty() {
             forwarders.keys().cloned().collect()
@@ -664,7 +650,24 @@ impl Server {
             self.mode = ClientMode::Normal;
         }
 
-        Ok(())
+        Ok(None)
+    }
+
+    // MULTI
+    fn handle_multi(&mut self) -> Value {
+        self.mode = ClientMode::Transaction {
+            queued_commands: Vec::new(),
+        };
+        Value::String("OK".into())
+    }
+
+    // WATCH key [key ...]
+    fn handle_watch(&mut self, args: &[Value]) -> Result<Value> {
+        for arg in args {
+            let key = unpack_bulk_string(arg)?;
+            self.watched_keys.insert(key.to_string());
+        }
+        Ok(Value::String("OK".into()))
     }
 
     // WAIT numreplicas timeout

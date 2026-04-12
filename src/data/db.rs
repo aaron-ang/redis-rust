@@ -7,6 +7,7 @@ use std::{
     time::SystemTime,
 };
 
+use ahash::RandomState;
 use anyhow::{bail, Result};
 use dashmap::DashMap;
 use futures::future::select_all;
@@ -63,9 +64,9 @@ impl RedisData {
 
 #[derive(Default)]
 pub struct Store {
-    entries: Arc<DashMap<String, RedisData>>,
-    list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>>>,
-    key_versions: DashMap<String, u64>,
+    entries: Arc<DashMap<String, RedisData, RandomState>>,
+    list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>, RandomState>>,
+    key_versions: DashMap<String, u64, RandomState>,
 }
 
 impl Store {
@@ -86,9 +87,9 @@ impl Store {
     #[must_use]
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
-            entries: Arc::new(DashMap::from_iter(entries)),
-            list_waiters: Arc::new(DashMap::new()),
-            key_versions: DashMap::new(),
+            entries: Arc::new(entries.into_iter().collect()),
+            list_waiters: Arc::new(DashMap::with_hasher(RandomState::default())),
+            key_versions: DashMap::with_hasher(RandomState::default()),
         }
     }
 

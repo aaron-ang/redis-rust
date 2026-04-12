@@ -14,7 +14,7 @@ use tokio::{
 use crate::data::Store;
 use crate::types::Command;
 
-use super::server::{self, BUFFER_SIZE, EMPTY_RDB_B64};
+use super::server::{self, encode_into, resp_encoded_len, BUFFER_SIZE, EMPTY_RDB_B64};
 
 const PSYNC_RESPONSE_LEN: usize = 56;
 
@@ -59,7 +59,7 @@ impl Follower {
                 Ok(value) => {
                     let (command, args) = server::extract_command(&value)?;
                     self.handle_command(command, args).await?;
-                    self.offset += value.encode().len();
+                    self.offset += resp_encoded_len(&value);
                 }
                 Err(e) => match e.kind() {
                     ErrorKind::UnexpectedEof => break,
@@ -117,7 +117,9 @@ impl Follower {
     }
 
     async fn send_command(&mut self, value: Value) -> Result<()> {
-        self.leader_stream.write_all(&value.encode()).await?;
+        let mut buf = Vec::with_capacity(resp_encoded_len(&value));
+        encode_into(&value, &mut buf);
+        self.leader_stream.write_all(&buf).await?;
         Ok(())
     }
 

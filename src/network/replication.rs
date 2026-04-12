@@ -3,6 +3,7 @@ use std::sync::{
     Arc,
 };
 
+use ahash::RandomState;
 use anyhow::Result;
 use dashmap::DashMap;
 use resp::Value;
@@ -24,7 +25,7 @@ pub enum ReplicaType {
 #[derive(Default)]
 pub struct ReplicationHub {
     next_id: AtomicUsize,
-    senders: DashMap<usize, mpsc::Sender<Value>>,
+    senders: DashMap<usize, mpsc::Sender<Value>, RandomState>,
     state: Arc<ReplicationState>,
 }
 

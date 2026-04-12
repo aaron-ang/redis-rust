@@ -41,6 +41,7 @@ enum ClientMode {
 pub struct Connection {
     stream: TcpStream,
     buffer: Vec<u8>,
+    read_buf: Vec<u8>,
 }
 
 impl Connection {
@@ -48,18 +49,17 @@ impl Connection {
         Connection {
             stream,
             buffer: Vec::with_capacity(BUFFER_SIZE),
+            read_buf: vec![0; BUFFER_SIZE],
         }
     }
 
     pub async fn read_value(&mut self) -> Result<Value> {
-        let mut temp_buf = vec![0; BUFFER_SIZE];
-
         loop {
             if !self.buffer.is_empty() {
                 let mut decoder = Decoder::new(BufReader::new(self.buffer.as_slice()));
                 match decoder.decode() {
                     Ok(value) => {
-                        let consumed = value.encode().len();
+                        let consumed = resp_encoded_len(&value);
                         self.buffer.drain(..consumed);
                         return Ok(value);
                     }
@@ -70,17 +70,16 @@ impl Connection {
                 }
             }
 
-            let bytes_read = self.stream.read(&mut temp_buf).await?;
+            let bytes_read = self.stream.read(&mut self.read_buf).await?;
             if bytes_read == 0 {
                 bail!("Connection closed")
             }
 
-            self.buffer.extend_from_slice(&temp_buf[..bytes_read]);
+            self.buffer.extend_from_slice(&self.read_buf[..bytes_read]);
         }
     }
 
     async fn read_values(&mut self) -> Result<Vec<Value>> {
-        let mut temp_buf = vec![0; BUFFER_SIZE];
         let mut values = Vec::new();
 
         loop {
@@ -89,8 +88,8 @@ impl Connection {
                 let mut total_consumed = 0;
 
                 while let Ok(value) = decoder.decode() {
-                    values.push(value.clone());
-                    total_consumed += value.encode().len();
+                    total_consumed += resp_encoded_len(&value);
+                    values.push(value);
                 }
 
                 if total_consumed > 0 {
@@ -102,7 +101,7 @@ impl Connection {
                 }
             }
 
-            let bytes_read = self.stream.read(&mut temp_buf).await?;
+            let bytes_read = self.stream.read(&mut self.read_buf).await?;
             if bytes_read == 0 {
                 if values.is_empty() {
                     bail!("Connection closed")
@@ -110,7 +109,7 @@ impl Connection {
                 return Ok(values);
             }
 
-            self.buffer.extend_from_slice(&temp_buf[..bytes_read]);
+            self.buffer.extend_from_slice(&self.read_buf[..bytes_read]);
         }
     }
 
@@ -120,7 +119,9 @@ impl Connection {
     }
 
     pub async fn write_value(&mut self, value: &Value) -> Result<()> {
-        self.stream.write_all(&value.encode()).await?;
+        let mut buf = Vec::with_capacity(resp_encoded_len(value));
+        encode_into(value, &mut buf);
+        self.stream.write_all(&buf).await?;
         Ok(())
     }
 
@@ -136,6 +137,7 @@ pub struct Server {
     mode: ClientMode,
     authenticated: bool,
     watched_keys: HashMap<String, u64>,
+    response_buf: Vec<u8>,
 }
 
 impl Server {
@@ -150,6 +152,7 @@ impl Server {
             mode: ClientMode::Normal,
             authenticated,
             watched_keys: HashMap::new(),
+            response_buf: Vec::with_capacity(512),
         }
     }
 
@@ -199,20 +202,20 @@ impl Server {
                     }
                 };
 
-                let mut response_buf = Vec::with_capacity(values.len());
+                self.response_buf.clear();
                 for value in values {
                     match self.process(&value).await {
-                        Ok(Some(response)) => response_buf.extend_from_slice(&response.encode()),
+                        Ok(Some(response)) => encode_into(&response, &mut self.response_buf),
                         Ok(None) => (),
                         Err(e) => {
                             eprintln!("Error processing command: {e}");
-                            response_buf.extend_from_slice(&Value::Error(e.to_string()).encode());
+                            encode_into(&Value::Error(e.to_string()), &mut self.response_buf);
                         }
                     }
                 }
 
-                if !response_buf.is_empty() {
-                    self.conn.write_all(&response_buf).await?;
+                if !self.response_buf.is_empty() {
+                    self.conn.write_all(&self.response_buf).await?;
                 }
             }
         }
@@ -559,7 +562,9 @@ impl Server {
         let channel = unpack_bulk_string(&args[0])?;
         let message = unpack_bulk_string(&args[1])?;
         let subscribed = self.config.pubsub.publish(channel, message);
-        Ok(Value::Integer(i64::try_from(subscribed).unwrap_or(i64::MAX)))
+        Ok(Value::Integer(
+            i64::try_from(subscribed).unwrap_or(i64::MAX),
+        ))
     }
 
     // PSYNC replicationid offset
@@ -1224,4 +1229,77 @@ pub fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
     }
 
     Ok(Value::Integer(added))
+}
+
+/// Compute the RESP wire-format byte length of a Value without allocating.
+pub(crate) fn resp_encoded_len(value: &Value) -> usize {
+    match value {
+        Value::Null | Value::NullArray => 5, // "$-1\r\n" or "*-1\r\n"
+        Value::String(s) | Value::Error(s) => 1 + s.len() + 2, // "+{s}\r\n" or "-{s}\r\n"
+        Value::Integer(i) => {
+            let mut buf = itoa::Buffer::new();
+            1 + buf.format(*i).len() + 2 // ":{i}\r\n"
+        }
+        Value::Bulk(s) => {
+            let mut buf = itoa::Buffer::new();
+            1 + buf.format(s.len()).len() + 2 + s.len() + 2 // "${len}\r\n{s}\r\n"
+        }
+        Value::BufBulk(v) => {
+            let mut buf = itoa::Buffer::new();
+            1 + buf.format(v.len()).len() + 2 + v.len() + 2
+        }
+        Value::Array(a) => {
+            let mut buf = itoa::Buffer::new();
+            1 + buf.format(a.len()).len() + 2 + a.iter().map(resp_encoded_len).sum::<usize>()
+        }
+    }
+}
+
+/// Encode a RESP Value directly into an existing buffer, avoiding intermediate allocation.
+pub(crate) fn encode_into(value: &Value, out: &mut Vec<u8>) {
+    match value {
+        Value::Null => out.extend_from_slice(b"$-1\r\n"),
+        Value::NullArray => out.extend_from_slice(b"*-1\r\n"),
+        Value::String(s) => {
+            out.push(b'+');
+            out.extend_from_slice(s.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Value::Error(s) => {
+            out.push(b'-');
+            out.extend_from_slice(s.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Value::Integer(i) => {
+            out.push(b':');
+            let mut buf = itoa::Buffer::new();
+            out.extend_from_slice(buf.format(*i).as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Value::Bulk(s) => {
+            out.push(b'$');
+            let mut buf = itoa::Buffer::new();
+            out.extend_from_slice(buf.format(s.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(s.as_bytes());
+            out.extend_from_slice(b"\r\n");
+        }
+        Value::BufBulk(v) => {
+            out.push(b'$');
+            let mut buf = itoa::Buffer::new();
+            out.extend_from_slice(buf.format(v.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            out.extend_from_slice(v);
+            out.extend_from_slice(b"\r\n");
+        }
+        Value::Array(a) => {
+            out.push(b'*');
+            let mut buf = itoa::Buffer::new();
+            out.extend_from_slice(buf.format(a.len()).as_bytes());
+            out.extend_from_slice(b"\r\n");
+            for item in a {
+                encode_into(item, out);
+            }
+        }
+    }
 }

@@ -1,5 +1,6 @@
 use std::{path::PathBuf, sync::Arc};
 
+use ahash::RandomState;
 use dashmap::DashMap;
 
 use crate::data::Store;
@@ -63,7 +64,7 @@ pub struct Config {
     pub store: Arc<Store>,
     pub replication: Arc<ReplicationHub>,
     pub pubsub: Arc<PubSub>,
-    pub acl_users: Arc<DashMap<String, AclUser>>,
+    pub acl_users: Arc<DashMap<String, AclUser, RandomState>>,
 }
 
 impl Config {
@@ -76,7 +77,7 @@ impl Config {
         role: ReplicaType,
         replicaof: Option<String>,
     ) -> Self {
-        let acl_users = Arc::new(DashMap::new());
+        let acl_users = Arc::new(DashMap::with_hasher(RandomState::default()));
         acl_users.insert(
             "default".to_string(),
             AclUser {

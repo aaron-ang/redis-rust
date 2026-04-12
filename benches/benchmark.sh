@@ -20,15 +20,9 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-# Move into benchmark directory if not already there
-if [ "$(basename "$PWD")" != "benchmark" ]; then
-    if [ -d benchmark ]; then
-        cd benchmark || exit 1
-    else
-        echo "Error: benchmark directory not found"
-        exit 1
-    fi
-fi
+# Move into benches directory if not already there
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 wait_for_server() {
     echo "Waiting for Redis..."

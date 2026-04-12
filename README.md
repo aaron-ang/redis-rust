@@ -42,7 +42,7 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ### Results
 
-![Latency by Percentile Distribution](benches/latency_distribution.png)
+![Latency by Percentile Distribution](assets/latency_distribution.png)
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
 | ----------------------- | --------- | -------- | -------- | ---------- | -------- |
@@ -71,11 +71,11 @@ Generate plots of the latency results using the output `.txt` files: https://hdr
 
 ### Rust Implementation
 
-![Rust Implementation Flamegraph](benches/flamegraph-rs.svg)
+![Rust Implementation Flamegraph](assets/flamegraph-rs.svg)
 
 ### Baseline
 
-![Baseline Flamegraph](benches/flamegraph-redis-server.svg)
+![Baseline Flamegraph](assets/flamegraph-redis-server.svg)
 
 ### Prerequisites
 

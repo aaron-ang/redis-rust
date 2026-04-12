@@ -23,15 +23,9 @@ cleanup() {
 
 trap cleanup INT TERM EXIT
 
-# Move into benchmark directory if not already there
-if [ "$(basename "$PWD")" != "benchmark" ]; then
-    if [ -d benchmark ]; then
-        cd benchmark || exit 1
-    else
-        echo "Error: benchmark directory not found"
-        exit 1
-    fi
-fi
+# Move into benches directory if not already there
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 wait_for_server() {
     echo "Waiting for server to be ready..."
@@ -93,7 +87,7 @@ wait_for_server
 
 load_data "redis-rs"
 setsid flamegraph -p $REDIS_PID \
-    -o flamegraph-rs.svg \
+    -o ../assets/flamegraph-rs.svg \
     --title "Redis Rust Implementation" \
     --deterministic \
     &
@@ -108,7 +102,7 @@ wait_for_server
 
 load_data "baseline"
 setsid flamegraph -p $REDIS_PID \
-    -o flamegraph-redis-server.svg \
+    -o ../assets/flamegraph-redis-server.svg \
     --title "Redis Baseline" \
     --deterministic \
     &

@@ -20,7 +20,7 @@ This Redis implementation has been benchmarked against the official Redis server
 - **Connections**: 50 per thread (300 total)
 - **Pipeline**: 10 commands
 - **Data Size**: 1024 bytes
-- **Key Space**: ~1.7M keys  
+- **Key Space**: ~1.7M keys
 - **Operation**: GET only
 
 ### Results
@@ -42,7 +42,7 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ### Results
 
-![Latency by Percentile Distribution](benchmark/latency_distribution.png)
+![Latency by Percentile Distribution](benches/latency_distribution.png)
 
 | Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
 | ----------------------- | --------- | -------- | -------- | ---------- | -------- |
@@ -55,24 +55,27 @@ This Redis implementation has been benchmarked against the official Redis server
 To run the benchmarks yourself:
 
 ```bash
-./benchmark/benchmark.sh
+./benches/benchmark.sh
 ```
 
 The script will:
+
 1. Run **throughput benchmarks** against both Redis baseline and Rust implementation
 2. Run **latency benchmarks** against both implementations
 3. Generate HDR histogram files for detailed latency analysis
-4. Output results to the `benchmark/out/` directory
+4. Output results to the `benches/out/` directory
 
 Generate plots of the latency results using the output `.txt` files: https://hdrhistogram.github.io/HdrHistogram/plotFiles.html
 
 ## Flamegraphs
 
 ### Rust Implementation
-![Rust Implementation Flamegraph](benchmark/flamegraph-rs.svg)
+
+![Rust Implementation Flamegraph](benches/flamegraph-rs.svg)
 
 ### Baseline
-![Baseline Flamegraph](benchmark/flamegraph-redis-server.svg)
+
+![Baseline Flamegraph](benches/flamegraph-redis-server.svg)
 
 ### Prerequisites
 
@@ -83,55 +86,56 @@ Generate plots of the latency results using the output `.txt` files: https://hdr
 # Features ✨
 
 This Redis clone supports the following features:
--   **Basic Commands** ⌨️:
-    -   `PING`: Checks server responsiveness.
-    -   `ECHO`: Returns the provided string.
-    -   `SET`: Stores a key-value pair.
-    -   `GET`: Retrieves the value associated with a key.
-    -   `INCR`: Increments the integer value of a key by one.
-    -   `INFO`: Provides information about replication.
-    -   `REPLCONF`: Used for replication configuration.
-    -   `PSYNC`: Facilitates partial or full resynchronization with a replica.
-    -   `WAIT`: Blocks until all previous write commands are successfully transferred and acknowledged by the specified number of replicas.
-    -   `CONFIG GET`: Retrieves configuration parameters.
-    -   `KEYS`: Returns all keys matching a pattern.
-    -   `TYPE`: Returns the string representation of the type of the value stored at key.
-    -   `DBSIZE`: Returns the number of keys in the database.
-    -   `FLUSHALL`: Removes all keys from all databases.
-    -   `COMMAND`: Returns details about all Redis commands.
--   **Transactions** 💳:
-    -   `MULTI`: Marks the start of a transaction block.
-    -   `EXEC`: Executes all commands issued after MULTI.
-    -   `DISCARD`: Discards all commands issued after MULTI.
--   **Lists** 📝:
-    -   `LPUSH`: Inserts elements at the head of a list.
-    -   `RPUSH`: Inserts elements at the tail of a list.
-    -   `LPOP`: Removes and returns the first element of a list.
-    -   `LLEN`: Returns the length of a list.
-    -   `LRANGE`: Returns a range of elements from a list.
-    -   `BLPOP`: Blocking version of LPOP that waits for elements.
--   **Sorted Sets** 🔢:
-    -   `ZADD`: Adds members with scores to a sorted set.
-    -   `ZREM`: Removes members from a sorted set.
-    -   `ZRANGE`: Returns a range of members from a sorted set by index.
-    -   `ZRANK`: Returns the rank of a member in a sorted set.
-    -   `ZSCORE`: Returns the score of a member in a sorted set.
-    -   `ZCARD`: Returns the number of members in a sorted set.
--   **Geospatial Commands** 🌍:
-    -   `GEOADD`: Adds geospatial items (longitude, latitude, name) to a sorted set.
-    -   `GEODIST`: Returns the distance between two members of a geospatial index.
-    -   `GEOPOS`: Returns longitude and latitude of members from a geospatial index.
-    -   `GEOSEARCH`: Searches for members within a geospatial index.
--   **Streams** 🌊:
-    -   `XADD`: Appends a new entry to a stream.
-    -   `XRANGE`: Returns a range of entries from a stream.
-    -   `XREAD`: Reads entries from one or more streams.
--   **Pub/Sub** 📢:
-    -   `PUBLISH`: Posts a message to a channel.
-    -   `SUBSCRIBE`: Subscribes the client to the given channels.
-    -   `UNSUBSCRIBE`: Unsubscribes the client from the given channels.
--   **Concurrency** ⚡: Utilizes an event loop model to handle multiple client connections concurrently.
--   **RESP Protocol** 🗣️: Communicates with clients using the Redis Serialization Protocol (RESP).
--   **Persistence** 💾: Supports RDB file persistence to save and load data.
--   **Replication** 🔄: Implements master-replica replication for data redundancy and read scaling.
--   **Pipelining** 🚀: Supports sending multiple commands without waiting for responses, improving throughput for batch operations.
+
+- **Basic Commands** ⌨️:
+  - `PING`: Checks server responsiveness.
+  - `ECHO`: Returns the provided string.
+  - `SET`: Stores a key-value pair.
+  - `GET`: Retrieves the value associated with a key.
+  - `INCR`: Increments the integer value of a key by one.
+  - `INFO`: Provides information about replication.
+  - `REPLCONF`: Used for replication configuration.
+  - `PSYNC`: Facilitates partial or full resynchronization with a replica.
+  - `WAIT`: Blocks until all previous write commands are successfully transferred and acknowledged by the specified number of replicas.
+  - `CONFIG GET`: Retrieves configuration parameters.
+  - `KEYS`: Returns all keys matching a pattern.
+  - `TYPE`: Returns the string representation of the type of the value stored at key.
+  - `DBSIZE`: Returns the number of keys in the database.
+  - `FLUSHALL`: Removes all keys from all databases.
+  - `COMMAND`: Returns details about all Redis commands.
+- **Transactions** 💳:
+  - `MULTI`: Marks the start of a transaction block.
+  - `EXEC`: Executes all commands issued after MULTI.
+  - `DISCARD`: Discards all commands issued after MULTI.
+- **Lists** 📝:
+  - `LPUSH`: Inserts elements at the head of a list.
+  - `RPUSH`: Inserts elements at the tail of a list.
+  - `LPOP`: Removes and returns the first element of a list.
+  - `LLEN`: Returns the length of a list.
+  - `LRANGE`: Returns a range of elements from a list.
+  - `BLPOP`: Blocking version of LPOP that waits for elements.
+- **Sorted Sets** 🔢:
+  - `ZADD`: Adds members with scores to a sorted set.
+  - `ZREM`: Removes members from a sorted set.
+  - `ZRANGE`: Returns a range of members from a sorted set by index.
+  - `ZRANK`: Returns the rank of a member in a sorted set.
+  - `ZSCORE`: Returns the score of a member in a sorted set.
+  - `ZCARD`: Returns the number of members in a sorted set.
+- **Geospatial Commands** 🌍:
+  - `GEOADD`: Adds geospatial items (longitude, latitude, name) to a sorted set.
+  - `GEODIST`: Returns the distance between two members of a geospatial index.
+  - `GEOPOS`: Returns longitude and latitude of members from a geospatial index.
+  - `GEOSEARCH`: Searches for members within a geospatial index.
+- **Streams** 🌊:
+  - `XADD`: Appends a new entry to a stream.
+  - `XRANGE`: Returns a range of entries from a stream.
+  - `XREAD`: Reads entries from one or more streams.
+- **Pub/Sub** 📢:
+  - `PUBLISH`: Posts a message to a channel.
+  - `SUBSCRIBE`: Subscribes the client to the given channels.
+  - `UNSUBSCRIBE`: Unsubscribes the client from the given channels.
+- **Concurrency** ⚡: Utilizes an event loop model to handle multiple client connections concurrently.
+- **RESP Protocol** 🗣️: Communicates with clients using the Redis Serialization Protocol (RESP).
+- **Persistence** 💾: Supports RDB file persistence to save and load data.
+- **Replication** 🔄: Implements master-replica replication for data redundancy and read scaling.
+- **Pipelining** 🚀: Supports sending multiple commands without waiting for responses, improving throughput for batch operations.

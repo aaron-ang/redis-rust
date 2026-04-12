@@ -81,6 +81,8 @@ run_benchmark() {
 
 echo "=== Generating Flamegraph for Rust Redis Implementation ==="
 export CARGO_PROFILE_RELEASE_DEBUG=true
+export RUSTFLAGS="-Cforce-frame-pointers=yes"
+cargo build --release --quiet
 cargo run --release &>/dev/null &
 REDIS_PID=$!
 wait_for_server
@@ -90,6 +92,7 @@ setsid flamegraph -p $REDIS_PID \
     -o ../assets/flamegraph-rs.svg \
     --title "Redis Rust Implementation" \
     --deterministic \
+    -c "record -g --all-user" \
     &
 FLAME_PID=$!
 run_benchmark "redis-rs"
@@ -105,6 +108,7 @@ setsid flamegraph -p $REDIS_PID \
     -o ../assets/flamegraph-redis-server.svg \
     --title "Redis Baseline" \
     --deterministic \
+    -c "record -g --all-user" \
     &
 FLAME_PID=$!
 run_benchmark "baseline"

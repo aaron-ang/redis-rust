@@ -97,6 +97,7 @@ run_latency_benchmark() {
 }
 
 echo "=== Benchmark 1: Rust Implementation ==="
+cargo build --release --quiet
 cargo run --release &>/dev/null &
 REDIS_PID=$!
 wait_for_server

@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{BufReader, ErrorKind},
     str::FromStr,
     time::SystemTime,
@@ -137,7 +137,7 @@ pub struct Server {
     conn: Connection,
     mode: ClientMode,
     authenticated: bool,
-    watched_keys: HashSet<String>,
+    watched_keys: HashMap<String, u64>,
 }
 
 impl Server {
@@ -151,7 +151,7 @@ impl Server {
             conn: Connection::new(stream),
             mode: ClientMode::Normal,
             authenticated,
-            watched_keys: HashSet::new(),
+            watched_keys: HashMap::new(),
         }
     }
 
@@ -207,23 +207,34 @@ impl Server {
                     let ClientMode::Transaction { queued_commands } = &mut self.mode else {
                         bail!("Expected transaction mode")
                     };
+                    let watch_violated = self
+                        .watched_keys
+                        .iter()
+                        .any(|(key, &version)| self.config.store.get_key_version(key) != version);
                     let commands = std::mem::take(queued_commands);
                     self.mode = ClientMode::Normal;
-                    let mut responses = Vec::with_capacity(commands.len());
-                    for cmd in commands {
-                        match Box::pin(self.process(&cmd)).await {
-                            Ok(Some(result)) => responses.push(result),
-                            Ok(None) => (),
-                            Err(e) => {
-                                eprintln!("Error processing command: {e}");
-                                responses.push(Value::Error(e.to_string()));
+                    self.watched_keys.clear();
+
+                    if watch_violated {
+                        Some(Value::NullArray)
+                    } else {
+                        let mut responses = Vec::with_capacity(commands.len());
+                        for cmd in commands {
+                            match Box::pin(self.process(&cmd)).await {
+                                Ok(Some(result)) => responses.push(result),
+                                Ok(None) => (),
+                                Err(e) => {
+                                    eprintln!("Error processing command: {e}");
+                                    responses.push(Value::Error(e.to_string()));
+                                }
                             }
                         }
+                        Some(Value::Array(responses))
                     }
-                    Some(Value::Array(responses))
                 }
                 Command::Discard => {
                     self.mode = ClientMode::Normal;
+                    self.watched_keys.clear();
                     Some(Value::String("OK".into()))
                 }
                 Command::Watch => bail!(RedisError::WatchInsideMulti),
@@ -283,12 +294,27 @@ impl Server {
             Command::ZScore => Some(self.handle_zscore(args)?),
         };
 
-        if command.is_write()
-            && self.config.role == ReplicaType::Leader
-            && self.config.replication.has_replicas()
-        {
-            self.config.replication.publish(cmd_line.clone());
-            self.config.replication.incr_num_commands();
+        if command.is_write() {
+            let key = match command {
+                Command::BLPop => {
+                    if let Some(Value::Array(items)) = &response {
+                        items.first().and_then(|v| match v {
+                            Value::Bulk(s) => Some(s.as_str()),
+                            _ => None,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                _ => args.first().and_then(|v| unpack_bulk_string(v).ok()),
+            };
+            if let Some(key) = key {
+                self.config.store.touch_key_version(key);
+            }
+            if self.config.role == ReplicaType::Leader && self.config.replication.has_replicas() {
+                self.config.replication.publish(cmd_line.clone());
+                self.config.replication.incr_num_commands();
+            }
         }
 
         Ok(response)
@@ -665,7 +691,8 @@ impl Server {
     fn handle_watch(&mut self, args: &[Value]) -> Result<Value> {
         for arg in args {
             let key = unpack_bulk_string(arg)?;
-            self.watched_keys.insert(key.to_string());
+            let version = self.config.store.get_key_version(key);
+            self.watched_keys.insert(key.to_string(), version);
         }
         Ok(Value::String("OK".into()))
     }

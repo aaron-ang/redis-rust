@@ -64,6 +64,7 @@ impl RedisData {
 pub struct Store {
     entries: Arc<DashMap<String, RedisData>>,
     list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>>>,
+    key_versions: DashMap<String, u64>,
 }
 
 impl Store {
@@ -83,6 +84,7 @@ impl Store {
         Store {
             entries: Arc::new(DashMap::from_iter(entries)),
             list_waiters: Arc::new(DashMap::new()),
+            key_versions: DashMap::new(),
         }
     }
 
@@ -100,6 +102,14 @@ impl Store {
                 return;
             }
         }
+    }
+
+    pub fn touch_key_version(&self, key: &str) {
+        *self.key_versions.entry(key.to_string()).or_insert(0) += 1;
+    }
+
+    pub fn get_key_version(&self, key: &str) -> u64 {
+        self.key_versions.get(key).map(|v| *v).unwrap_or(0)
     }
 
     pub fn db_size(&self) -> usize {

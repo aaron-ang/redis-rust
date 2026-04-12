@@ -292,6 +292,7 @@ impl Server {
                 }
             }
             Command::Wait => Some(self.handle_wait(args).await?),
+            Command::Watch => Some(Value::String("OK".into())),
             Command::XAdd => Some(handle_xadd(args, &self.config.store)?),
             Command::XRange => Some(self.handle_xrange(args)?),
             Command::XRead => Some(self.handle_xread(args).await?),

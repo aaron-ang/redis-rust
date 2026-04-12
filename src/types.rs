@@ -61,6 +61,7 @@ pub enum Command {
     Type,
     Unsubscribe,
     Wait,
+    Watch,
     XAdd,
     XRange,
     XRead,

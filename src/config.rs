@@ -20,11 +20,12 @@ impl AclFlags {
         AclFlags(1 << i)
     }
 
-    pub fn contains(&self, name: &str) -> bool {
+    #[must_use]
+    pub fn contains(self, name: &str) -> bool {
         FLAG_NAMES
             .iter()
             .position(|&n| n == name)
-            .map_or(false, |i| self.0 & (1 << i) != 0)
+            .is_some_and(|i| self.0 & (1 << i) != 0)
     }
 
     pub fn set(&mut self, name: &str, on: bool) {
@@ -66,6 +67,7 @@ pub struct Config {
 }
 
 impl Config {
+    #[must_use]
     pub fn new(
         port: u16,
         dir: Option<PathBuf>,

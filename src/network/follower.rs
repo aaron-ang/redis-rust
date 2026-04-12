@@ -35,6 +35,8 @@ impl Follower {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the connection to the leader fails.
     pub async fn handle_conn(&mut self) -> Result<()> {
         let mut buf = vec![0; BUFFER_SIZE];
         self.connect_to_leader().await?;
@@ -84,11 +86,11 @@ impl Follower {
                 server::handle_lpop(args, &self.store)?;
             }
             Command::LPush => {
-                server::handle_lpush(args, &self.store).await?;
+                server::handle_lpush(args, &self.store)?;
             }
             Command::ReplConf => self.handle_replconf().await?,
             Command::RPush => {
-                server::handle_rpush(args, &self.store).await?;
+                server::handle_rpush(args, &self.store)?;
             }
             Command::Set => {
                 server::handle_set(args, &self.store)?;
@@ -160,7 +162,7 @@ impl Follower {
         // Verify responses
         for _ in 0..2 {
             match self.read_response().await? {
-                Value::String(res) if res == "OK" => continue,
+                Value::String(res) if res == "OK" => {}
                 _ => bail!("Unexpected response to REPLCONF"),
             }
         }
@@ -199,7 +201,7 @@ impl Follower {
     async fn verify_rdb_file(&mut self) -> Result<()> {
         let rdb = BASE64_STANDARD.decode(EMPTY_RDB_B64)?;
         let mut msg_bytes = format!("${}\r\n", rdb.len()).into_bytes();
-        msg_bytes.append(&mut rdb.to_vec());
+        msg_bytes.append(&mut rdb.clone());
 
         let mut rdb_buf = vec![0; msg_bytes.len()];
         self.leader_stream.read_exact(&mut rdb_buf).await?;

@@ -13,6 +13,9 @@ pub struct PubSub {
 }
 
 impl PubSub {
+    /// # Panics
+    /// Panics if the internal `RwLock` is poisoned.
+    #[must_use]
     pub fn subscribe(&self, channel: &str) -> broadcast::Receiver<String> {
         let mut channels = self.channels.write().unwrap();
         channels
@@ -21,6 +24,9 @@ impl PubSub {
             .subscribe()
     }
 
+    /// # Panics
+    /// Panics if the internal `RwLock` is poisoned.
+    #[must_use]
     pub fn publish(&self, channel: &str, message: &str) -> usize {
         let Some(sender) = self.channels.read().unwrap().get(channel).cloned() else {
             return 0;

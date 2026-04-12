@@ -1,4 +1,5 @@
 use std::{
+    borrow::ToOwned,
     collections::{HashMap, VecDeque},
     fs,
     path::PathBuf,
@@ -68,6 +69,8 @@ pub struct Store {
 }
 
 impl Store {
+    /// # Errors
+    /// Returns an error if the RDB file exists but cannot be read or parsed.
     pub fn from_path(dir: &Option<PathBuf>, dbfilename: &Option<String>) -> Result<Arc<Self>> {
         if let (Some(dir), Some(filename)) = (dir, dbfilename) {
             let path = dir.join(filename);
@@ -80,6 +83,7 @@ impl Store {
         Ok(Self::default().to_shared())
     }
 
+    #[must_use]
     pub fn new_with_entries(entries: HashMap<String, RedisData>) -> Self {
         Store {
             entries: Arc::new(DashMap::from_iter(entries)),
@@ -88,11 +92,12 @@ impl Store {
         }
     }
 
+    #[must_use]
     pub fn to_shared(self) -> Arc<Self> {
         Arc::new(self)
     }
 
-    async fn notify_list_waiters(&self, key: &str) {
+    fn notify_list_waiters(&self, key: &str) {
         let Some(mut wait_queue) = self.list_waiters.get_mut(key) else {
             return;
         };
@@ -108,10 +113,12 @@ impl Store {
         *self.key_versions.entry(key.to_string()).or_insert(0) += 1;
     }
 
+    #[must_use]
     pub fn get_key_version(&self, key: &str) -> u64 {
-        self.key_versions.get(key).map(|v| *v).unwrap_or(0)
+        self.key_versions.get(key).map_or(0, |v| *v)
     }
 
+    #[must_use]
     pub fn db_size(&self) -> usize {
         self.entries.len()
     }
@@ -120,6 +127,7 @@ impl Store {
         self.entries.clear();
     }
 
+    #[must_use]
     pub fn get(&self, key: &str) -> Option<StringRecord> {
         let entry = self.entries.get(key)?;
         if entry.is_expired() {
@@ -138,6 +146,8 @@ impl Store {
             .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-string value.
     pub fn incr(&self, key: &str) -> Result<i64> {
         let mut entry = self
             .entries
@@ -149,7 +159,9 @@ impl Store {
         string_rec.incr()
     }
 
-    pub async fn rpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-list value.
+    pub fn rpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
         let len = {
             let mut entry = self
                 .entries
@@ -161,12 +173,14 @@ impl Store {
             for element in elements {
                 list.push_back(element.to_string());
             }
-            list.len() as i64
+            i64::try_from(list.len()).unwrap_or(i64::MAX)
         };
-        self.notify_list_waiters(key).await;
+        self.notify_list_waiters(key);
         Ok(len)
     }
 
+    /// # Errors
+    /// Returns `WrongType` if any key holds a non-list value.
     pub async fn blpop(&self, keys: &[&str], timeout: f64) -> Result<Option<(String, String)>> {
         let deadline = if timeout > 0.0 {
             Some(Instant::now() + Duration::from_secs_f64(timeout))
@@ -217,6 +231,8 @@ impl Store {
         }
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-list value.
     pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
         let Some(mut entry) = self.entries.get_mut(key) else {
             return Ok(Vec::new());
@@ -235,7 +251,9 @@ impl Store {
         Ok(result)
     }
 
-    pub async fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-list value.
+    pub fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
         let len = {
             let mut entry = self
                 .entries
@@ -248,12 +266,14 @@ impl Store {
             for element in elements {
                 list.push_front(element.to_string());
             }
-            list.len() as i64
+            i64::try_from(list.len()).unwrap_or(i64::MAX)
         };
-        self.notify_list_waiters(key).await;
+        self.notify_list_waiters(key);
         Ok(len)
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-list value.
     pub fn lrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
@@ -262,14 +282,16 @@ impl Store {
             bail!(RedisError::WrongType);
         };
 
-        let len = list.len() as i64;
+        let len = i64::try_from(list.len()).unwrap_or(i64::MAX);
         let start = if start < 0 { len + start } else { start };
         let end = if end < 0 { len + end } else { end };
-        let start = start.max(0) as usize;
-        let end = end.min(len - 1) as usize;
-        Ok(list.range(start..=end).map(|s| s.to_owned()).collect())
+        let start = usize::try_from(start.max(0)).unwrap_or(0);
+        let end = usize::try_from(end.min(len - 1)).unwrap_or(0);
+        Ok(list.range(start..=end).map(ToOwned::to_owned).collect())
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-list value.
     pub fn llen(&self, key: &str) -> Result<i64> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
@@ -277,9 +299,11 @@ impl Store {
         let RecordType::List(list) = &entry.record else {
             bail!(RedisError::WrongType);
         };
-        Ok(list.len() as i64)
+        Ok(i64::try_from(list.len()).unwrap_or(i64::MAX))
     }
 
+    /// # Errors
+    /// Returns an error if the glob pattern is invalid.
     pub fn keys(&self, pattern: &str) -> Result<Vec<String>> {
         let pattern = Pattern::new(pattern)?;
         let mut expired = Vec::new();
@@ -301,6 +325,7 @@ impl Store {
         Ok(matched)
     }
 
+    #[must_use]
     pub fn type_(&self, key: &str) -> String {
         let Some(entry) = self.entries.get(key) else {
             return "none".into();
@@ -314,6 +339,8 @@ impl Store {
         type_.into()
     }
 
+    /// # Errors
+    /// Returns `WrongType` or an invalid entry ID error.
     pub fn add_stream_entry(
         &self,
         key: &str,
@@ -335,6 +362,8 @@ impl Store {
         stream.xadd(entry_id, values)
     }
 
+    /// # Errors
+    /// Returns `WrongType` or `KeyNotFound` if the key is missing or not a stream.
     pub fn get_range_stream_entries(
         &self,
         key: &str,
@@ -354,6 +383,8 @@ impl Store {
         Ok(stream.xrange(start, end, false))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if a key holds a non-stream value, or an invalid entry ID error.
     pub async fn get_bulk_stream_entries(
         &self,
         streams: &[(&str, &str)],
@@ -369,16 +400,15 @@ impl Store {
             let RecordType::Stream(stream) = &mut entry.record else {
                 bail!(RedisError::WrongType);
             };
-            match start_id {
-                "$" => stream.subscribe(stream.last_entry_id(), tx.clone()),
-                _ => {
-                    let start = StreamEntryId::parse_start_range(start_id)?;
-                    let range_entries = stream.xrange(start, StreamEntryId::MAX, true);
-                    if range_entries.is_empty() {
-                        stream.subscribe(start, tx.clone());
-                    } else {
-                        res.insert(stream_key.to_owned(), range_entries);
-                    }
+            if start_id == "$" {
+                stream.subscribe(stream.last_entry_id(), tx.clone());
+            } else {
+                let start = StreamEntryId::parse_start_range(start_id)?;
+                let range_entries = stream.xrange(start, StreamEntryId::MAX, true);
+                if range_entries.is_empty() {
+                    stream.subscribe(start, tx.clone());
+                } else {
+                    res.insert(stream_key.to_owned(), range_entries);
                 }
             }
         }
@@ -399,10 +429,12 @@ impl Store {
                 .await
                 .unwrap_or_default()),
             XReadBlockType::WaitIndefinitely => Ok(await_stream_entry.await),
-            _ => unreachable!(),
+            XReadBlockType::NoWait => unreachable!(),
         }
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
         let mut entry = self
             .entries
@@ -415,6 +447,8 @@ impl Store {
         Ok(sorted_set.add(member, score))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zcard(&self, key: &str) -> Result<i64> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(0);
@@ -425,6 +459,8 @@ impl Store {
         Ok(sorted_set.len())
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zrange(&self, key: &str, start: i64, end: i64) -> Result<Vec<String>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(Vec::new());
@@ -435,6 +471,8 @@ impl Store {
         Ok(sorted_set.range(start, end))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zrank(&self, key: &str, member: &str) -> Result<Option<i64>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(None);
@@ -445,6 +483,8 @@ impl Store {
         Ok(sorted_set.rank(member))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
         let mut entry = self
             .entries
@@ -456,6 +496,8 @@ impl Store {
         Ok(sorted_set.remove(members))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zscore(&self, key: &str, member: &str) -> Result<Option<f64>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(None);
@@ -466,6 +508,9 @@ impl Store {
         Ok(sorted_set.score(member))
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn geodist(&self, key: &str, member1: &str, member2: &str) -> Result<Option<f64>> {
         let (score1, score2) = {
             let Some(entry) = self.entries.get(key) else {
@@ -487,6 +532,9 @@ impl Store {
         }
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn geopos(&self, key: &str, members: &[&str]) -> Result<Vec<Option<(f64, f64)>>> {
         let Some(entry) = self.entries.get(key) else {
             return Ok(vec![None; members.len()]);
@@ -506,6 +554,9 @@ impl Store {
         Ok(positions)
     }
 
+    /// # Errors
+    /// Returns `WrongType` if the key holds a non-sorted-set value.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     pub fn geosearch(
         &self,
         key: &str,

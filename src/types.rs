@@ -75,7 +75,8 @@ pub enum Command {
 }
 
 impl Command {
-    pub fn is_write(&self) -> bool {
+    #[must_use]
+    pub fn is_write(self) -> bool {
         matches!(
             self,
             Command::BLPop
@@ -312,7 +313,9 @@ impl Instance {
         let expires_on = match buf.read_u8()? {
             0 => None,
             0xFC => Some(UNIX_EPOCH + Duration::from_millis(buf.read_u64::<LittleEndian>()?)),
-            0xFD => Some(UNIX_EPOCH + Duration::from_secs(buf.read_u32::<LittleEndian>()? as u64)),
+            0xFD => {
+                Some(UNIX_EPOCH + Duration::from_secs(u64::from(buf.read_u32::<LittleEndian>()?)))
+            }
             flag => anyhow::bail!("Invalid value flag: {flag}"),
         };
 

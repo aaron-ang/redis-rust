@@ -40,13 +40,13 @@ impl StreamRecord {
     ) -> Result<StreamEntryId> {
         let entry_id = self.generate_entry_id(entry_id_str)?;
         self.validate_entry_id(entry_id)?;
-        self.value.0.insert(entry_id, values.clone());
 
         // Notify listeners whose expected_id is less than or equal to the new entry_id
         let message = (
             self.stream_id.clone(),
             StreamValue(BTreeMap::from([(entry_id, values.clone())])),
         );
+        self.value.0.insert(entry_id, values);
         self.listeners.retain(|expected_id, senders| {
             if *expected_id <= entry_id {
                 for tx in senders {

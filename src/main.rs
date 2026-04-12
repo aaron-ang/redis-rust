@@ -7,7 +7,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use codecrafters_redis::*;
+use codecrafters_redis::{Config, Follower, ReplicaType, Server, Store};
 
 const PORT: u16 = 6379;
 
@@ -29,7 +29,7 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = setup_config().await?;
+    let config = setup_config()?;
 
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
     let listener = TcpListener::bind(addr).await?;
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
     }
 }
 
-async fn setup_config() -> Result<Config> {
+fn setup_config() -> Result<Config> {
     let args = Args::parse();
     let store = Store::from_path(&args.dir, &args.dbfilename)?;
     let role = determine_role(&args);

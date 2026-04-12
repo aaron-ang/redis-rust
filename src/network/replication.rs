@@ -29,7 +29,7 @@ pub struct ReplicationHub {
 }
 
 impl ReplicationHub {
-    pub fn publish(&self, msg: Value) {
+    pub fn publish(&self, msg: &Value) {
         self.senders
             .retain(|_, sender| sender.try_send(msg.clone()).is_ok());
     }
@@ -49,10 +49,10 @@ impl ReplicationHub {
         self.state.get_num_commands()
     }
     pub fn incr_num_commands(&self) {
-        self.state.incr_num_commands()
+        self.state.incr_num_commands();
     }
     pub fn reset(&self) {
-        self.state.reset()
+        self.state.reset();
     }
 
     pub async fn run_replica(&self, conn: &mut Connection) -> Result<()> {
@@ -61,7 +61,7 @@ impl ReplicationHub {
             tokio::select! {
                 maybe_msg = rx.recv() => {
                     if let Some(msg) = maybe_msg {
-                        conn.write_value(&msg).await?
+                        conn.write_value(&msg).await?;
                     } else {
                         break;
                     }
@@ -70,9 +70,8 @@ impl ReplicationHub {
                     if let Err(e) = ack {
                         eprintln!("Error reading ACK: {e}");
                         break;
-                    } else {
-                        self.state.incr_num_ack();
                     }
+                    self.state.incr_num_ack();
                 }
             }
         }

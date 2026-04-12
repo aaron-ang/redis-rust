@@ -24,7 +24,7 @@ impl SortedSetRecord {
     }
 
     pub fn len(&self) -> i64 {
-        self.by_score.len() as i64
+        i64::try_from(self.by_score.len()).unwrap_or(i64::MAX)
     }
 
     pub fn add(&mut self, member: &str, score: f64) -> bool {
@@ -73,7 +73,9 @@ impl SortedSetRecord {
                     });
                 })
             })
-            .count() as i64
+            .count()
+            .try_into()
+            .unwrap_or(i64::MAX)
     }
 
     pub fn range(&self, start: i64, end: i64) -> Vec<String> {
@@ -98,15 +100,16 @@ impl SortedSetRecord {
 
         self.by_score
             .index_range(start..end + 1)
-            .map(|e| e.member.to_owned())
+            .map(|e| e.member.clone())
             .collect()
     }
 
     fn normalize(idx: i64, len: usize) -> usize {
         if idx < 0 {
-            (idx + len as i64).max(0) as usize
+            let len_i64 = i64::try_from(len).unwrap_or(i64::MAX);
+            usize::try_from((idx + len_i64).max(0)).unwrap_or(0)
         } else {
-            idx as usize
+            usize::try_from(idx).unwrap_or(usize::MAX)
         }
     }
 
@@ -116,7 +119,9 @@ impl SortedSetRecord {
             score,
             member: member.to_string(),
         };
-        self.by_score.index_of(&key).map(|i| i as i64)
+        self.by_score
+            .index_of(&key)
+            .and_then(|i| i64::try_from(i).ok())
     }
 
     pub fn score(&self, member: &str) -> Option<f64> {

@@ -143,7 +143,7 @@ impl Server {
         let authenticated = config
             .acl_users
             .get("default")
-            .map_or(false, |user| user.flags.contains("nopass"));
+            .is_some_and(|user| user.flags.contains("nopass"));
         Server {
             config,
             conn: Connection::new(stream),
@@ -153,6 +153,8 @@ impl Server {
         }
     }
 
+    /// # Errors
+    /// Returns an error if the TCP connection fails.
     pub async fn handle_conn(&mut self) -> Result<()> {
         loop {
             if let ClientMode::Subscribed { subscriptions } = &mut self.mode {
@@ -217,6 +219,8 @@ impl Server {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns a `RedisError` for invalid commands, auth failures, or command-specific errors.
     pub async fn process(&mut self, cmd_line: &Value) -> Result<Option<Value>> {
         let (command, args) = extract_command(cmd_line)?;
 
@@ -233,52 +237,8 @@ impl Server {
             bail!(RedisError::CommandWithoutSubscribe(command))
         }
 
-        // Transaction mode handling
         if matches!(self.mode, ClientMode::Transaction { .. }) {
-            let response = match command {
-                Command::Exec => {
-                    let ClientMode::Transaction { queued_commands } = &mut self.mode else {
-                        bail!("Expected transaction mode")
-                    };
-                    let watch_violated = self
-                        .watched_keys
-                        .iter()
-                        .any(|(key, &version)| self.config.store.get_key_version(key) != version);
-                    let commands = std::mem::take(queued_commands);
-                    self.mode = ClientMode::Normal;
-                    self.watched_keys.clear();
-
-                    if watch_violated {
-                        Some(Value::NullArray)
-                    } else {
-                        let mut responses = Vec::with_capacity(commands.len());
-                        for cmd in commands {
-                            match Box::pin(self.process(&cmd)).await {
-                                Ok(Some(result)) => responses.push(result),
-                                Ok(None) => (),
-                                Err(e) => {
-                                    eprintln!("Error processing command: {e}");
-                                    responses.push(Value::Error(e.to_string()));
-                                }
-                            }
-                        }
-                        Some(Value::Array(responses))
-                    }
-                }
-                Command::Discard => {
-                    self.mode = ClientMode::Normal;
-                    self.watched_keys.clear();
-                    Some(Value::String("OK".into()))
-                }
-                Command::Watch => bail!(RedisError::WatchInsideMulti),
-                _ => {
-                    if let ClientMode::Transaction { queued_commands } = &mut self.mode {
-                        queued_commands.push(cmd_line.clone());
-                    }
-                    Some(Value::String("QUEUED".into()))
-                }
-            };
-            return Ok(response);
+            return self.process_transaction(command, cmd_line).await;
         }
 
         let response = match command {
@@ -287,11 +247,10 @@ impl Server {
             Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
             Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
-            Command::DbSize => Some(self.handle_db_size()?),
-            Command::Discard => bail!(RedisError::CommandWithoutMulti(command)),
+            Command::DbSize => Some(self.handle_db_size()),
+            Command::Discard | Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
-            Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
-            Command::FlushAll => Some(self.handle_flushall()?),
+            Command::FlushAll => Some(self.handle_flushall()),
             Command::GeoAdd => Some(handle_geoadd(args, &self.config.store)?),
             Command::GeoDist => Some(self.handle_geodist(args)?),
             Command::GeoPos => Some(self.handle_geopos(args)?),
@@ -302,14 +261,14 @@ impl Server {
             Command::Keys => Some(self.handle_keys(args)?),
             Command::LLen => Some(self.handle_llen(args)?),
             Command::LPop => Some(handle_lpop(args, &self.config.store)?),
-            Command::LPush => Some(handle_lpush(args, &self.config.store).await?),
+            Command::LPush => Some(handle_lpush(args, &self.config.store)?),
             Command::LRange => Some(self.handle_lrange(args)?),
             Command::Multi => Some(self.handle_multi()),
             Command::Ping => Some(self.handle_ping(args)),
-            Command::Publish => Some(self.handle_publish(args).await?),
+            Command::Publish => Some(self.handle_publish(args)?),
             Command::PSync => self.handle_psync().await?,
             Command::ReplConf => Some(Value::String("OK".into())),
-            Command::RPush => Some(handle_rpush(args, &self.config.store).await?),
+            Command::RPush => Some(handle_rpush(args, &self.config.store)?),
             Command::Set => Some(handle_set(args, &self.config.store)?),
             Command::Subscribe => self.handle_subscribe(args).await?,
             Command::Type => Some(self.handle_type(args)?),
@@ -346,11 +305,62 @@ impl Server {
                 self.config.store.touch_key_version(key);
             }
             if self.config.role == ReplicaType::Leader && self.config.replication.has_replicas() {
-                self.config.replication.publish(cmd_line.clone());
+                self.config.replication.publish(cmd_line);
                 self.config.replication.incr_num_commands();
             }
         }
 
+        Ok(response)
+    }
+
+    async fn process_transaction(
+        &mut self,
+        command: Command,
+        cmd_line: &Value,
+    ) -> Result<Option<Value>> {
+        let response = match command {
+            Command::Exec => {
+                let ClientMode::Transaction { queued_commands } = &mut self.mode else {
+                    bail!("Expected transaction mode")
+                };
+                let watch_violated = self
+                    .watched_keys
+                    .iter()
+                    .any(|(key, &version)| self.config.store.get_key_version(key) != version);
+                let commands = std::mem::take(queued_commands);
+                self.mode = ClientMode::Normal;
+                self.watched_keys.clear();
+
+                if watch_violated {
+                    Some(Value::NullArray)
+                } else {
+                    let mut responses = Vec::with_capacity(commands.len());
+                    for cmd in commands {
+                        match Box::pin(self.process(&cmd)).await {
+                            Ok(Some(result)) => responses.push(result),
+                            Ok(None) => (),
+                            Err(e) => {
+                                eprintln!("Error processing command: {e}");
+                                responses.push(Value::Error(e.to_string()));
+                            }
+                        }
+                    }
+                    Some(Value::Array(responses))
+                }
+            }
+            Command::Discard => {
+                self.mode = ClientMode::Normal;
+                self.watched_keys.clear();
+                Some(Value::String("OK".into()))
+            }
+            Command::Watch => bail!(RedisError::WatchInsideMulti),
+            _ => {
+                if let ClientMode::Transaction { queued_commands } = &mut self.mode {
+                    queued_commands.push(cmd_line.clone());
+                }
+                Some(Value::String("QUEUED".into()))
+            }
+        };
         Ok(response)
     }
 
@@ -373,7 +383,7 @@ impl Server {
                     let passwords: Vec<Value> = user
                         .passwords
                         .iter()
-                        .map(|s| Value::Bulk(s.clone().into()))
+                        .map(|s| Value::Bulk(s.clone()))
                         .collect();
                     Ok(Value::Array(vec![
                         Value::Bulk("flags".into()),
@@ -399,7 +409,7 @@ impl Server {
                     let rule_str = unpack_bulk_string(rule)?;
                     if let Some(password) = rule_str.strip_prefix('>') {
                         let hash = Sha256::digest(password.as_bytes());
-                        let hex_hash = format!("{:x}", hash);
+                        let hex_hash = format!("{hash:x}");
                         user.passwords.push(hex_hash);
                         user.flags.set("nopass", false);
                     }
@@ -427,7 +437,7 @@ impl Server {
             true
         } else {
             let hash = Sha256::digest(password.as_bytes());
-            let hex_hash = format!("{:x}", hash);
+            let hex_hash = format!("{hash:x}");
             user.passwords.iter().any(|p| p == &hex_hash)
         };
         if password_ok {
@@ -473,14 +483,14 @@ impl Server {
     }
 
     // DBSIZE
-    fn handle_db_size(&self) -> Result<Value> {
-        Ok(Value::Integer(self.config.store.db_size() as i64))
+    fn handle_db_size(&self) -> Value {
+        Value::Integer(i64::try_from(self.config.store.db_size()).unwrap_or(i64::MAX))
     }
 
     // FLUSHALL
-    fn handle_flushall(&self) -> Result<Value> {
+    fn handle_flushall(&self) -> Value {
         self.config.store.flushall();
-        Ok(Value::String("OK".into()))
+        Value::String("OK".into())
     }
 
     // INFO
@@ -542,14 +552,14 @@ impl Server {
     }
 
     // PUBLISH channel message
-    async fn handle_publish(&self, args: &[Value]) -> Result<Value> {
+    fn handle_publish(&self, args: &[Value]) -> Result<Value> {
         if args.len() != 2 {
             bail!(RedisError::InvalidArgument)
         }
         let channel = unpack_bulk_string(&args[0])?;
         let message = unpack_bulk_string(&args[1])?;
         let subscribed = self.config.pubsub.publish(channel, message);
-        Ok(Value::Integer(subscribed as i64))
+        Ok(Value::Integer(i64::try_from(subscribed).unwrap_or(i64::MAX)))
     }
 
     // PSYNC replicationid offset
@@ -598,7 +608,7 @@ impl Server {
             let response = Value::Array(vec![
                 Value::Bulk("subscribe".into()),
                 Value::Bulk(channel.into()),
-                Value::Integer(subscriptions.len() as i64),
+                Value::Integer(i64::try_from(subscriptions.len()).unwrap_or(i64::MAX)),
             ]);
             self.conn.write_value(&response).await?;
         }
@@ -612,20 +622,17 @@ impl Server {
             bail!(RedisError::InvalidArgument)
         }
         let key = unpack_bulk_string(&args[0])?;
-        Ok(Value::String(self.config.store.type_(key).into()))
+        Ok(Value::String(self.config.store.type_(key)))
     }
 
     // UNSUBSCRIBE [channel [channel ...]]
     async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<Option<Value>> {
-        let subscriptions = match &mut self.mode {
-            ClientMode::Subscribed { subscriptions } => subscriptions,
-            _ => {
-                return Ok(Some(Value::Array(vec![
-                    Value::Bulk("unsubscribe".into()),
-                    Value::Null,
-                    Value::Integer(0),
-                ])));
-            }
+        let ClientMode::Subscribed { subscriptions } = &mut self.mode else {
+            return Ok(Some(Value::Array(vec![
+                Value::Bulk("unsubscribe".into()),
+                Value::Null,
+                Value::Integer(0),
+            ])));
         };
 
         let channels = args
@@ -636,7 +643,10 @@ impl Server {
         let target_channels: Vec<String> = if channels.is_empty() {
             subscriptions.keys().cloned().collect()
         } else {
-            channels.iter().map(|c| c.to_string()).collect()
+            channels
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect()
         };
 
         for channel in target_channels {
@@ -644,7 +654,7 @@ impl Server {
             let response = Value::Array(vec![
                 Value::Bulk("unsubscribe".into()),
                 Value::Bulk(channel),
-                Value::Integer(subscriptions.len() as i64),
+                Value::Integer(i64::try_from(subscriptions.len()).unwrap_or(i64::MAX)),
             ]);
             self.conn.write_value(&response).await?;
         }
@@ -683,7 +693,9 @@ impl Server {
     // WAIT numreplicas timeout
     async fn handle_wait(&mut self, args: &[Value]) -> Result<Value> {
         if self.config.replication.get_num_commands() == 0 {
-            return Ok(Value::Integer(self.config.replication.num_replicas() as i64));
+            return Ok(Value::Integer(
+                i64::try_from(self.config.replication.num_replicas()).unwrap_or(i64::MAX),
+            ));
         }
 
         if args.len() != 2 {
@@ -694,7 +706,7 @@ impl Server {
         let timeout_ms: u64 = unpack_bulk_string(&args[1])?.parse()?;
 
         // Ask all replicas to send ACKs.
-        self.config.replication.publish(Value::Array(vec![
+        self.config.replication.publish(&Value::Array(vec![
             Value::Bulk("REPLCONF".into()),
             Value::Bulk("GETACK".into()),
             Value::Bulk("*".into()),
@@ -713,7 +725,7 @@ impl Server {
 
         self.config.replication.reset();
 
-        Ok(Value::Integer(num_ack as i64))
+        Ok(Value::Integer(i64::try_from(num_ack).unwrap_or(i64::MAX)))
     }
 
     // XRANGE key start end
@@ -734,7 +746,7 @@ impl Server {
         if stream_entries.is_empty() {
             Ok(Value::Null)
         } else {
-            let values = build_stream_entry_list(stream_entries);
+            let values = build_stream_entry_list(&stream_entries);
             Ok(Value::Array(values))
         }
     }
@@ -793,7 +805,7 @@ impl Server {
                     entries.get(key).map(|stream| {
                         Value::Array(vec![
                             Value::Bulk(key.to_string()),
-                            Value::Array(build_stream_entry_list(stream.clone())),
+                            Value::Array(build_stream_entry_list(stream)),
                         ])
                     })
                 })
@@ -927,17 +939,14 @@ impl Server {
     }
 }
 
-fn build_stream_entry_list(entries: StreamValue) -> Vec<Value> {
+fn build_stream_entry_list(entries: &StreamValue) -> Vec<Value> {
     entries
         .iter()
         .map(|(id, fields)| {
             let field_values = fields
                 .iter()
                 .flat_map(|(field, value)| {
-                    vec![
-                        Value::Bulk(field.to_string()),
-                        Value::Bulk(value.to_string()),
-                    ]
+                    vec![Value::Bulk(field.clone()), Value::Bulk(value.clone())]
                 })
                 .collect();
             Value::Array(vec![
@@ -953,20 +962,19 @@ pub fn extract_command(value: &Value) -> Result<(Command, &[Value])> {
         bail!("Expected array value")
     };
     let command_str = unpack_bulk_string(&args[0])?;
-    match Command::from_str(command_str) {
-        Ok(command) => Ok((command, &args[1..])),
-        Err(_) => {
-            let arg_str_vec = QuotedArgs(
-                args[1..]
-                    .iter()
-                    .filter_map(|v| v.to_encoded_string().ok())
-                    .collect::<Vec<_>>(),
-            );
-            bail!(RedisError::UnknownCommand(
-                command_str.to_string(),
-                arg_str_vec
-            ))
-        }
+    if let Ok(command) = Command::from_str(command_str) {
+        Ok((command, &args[1..]))
+    } else {
+        let arg_str_vec = QuotedArgs(
+            args[1..]
+                .iter()
+                .filter_map(|v| v.to_encoded_string().ok())
+                .collect::<Vec<_>>(),
+        );
+        bail!(RedisError::UnknownCommand(
+            command_str.to_string(),
+            arg_str_vec
+        ))
     }
 }
 
@@ -982,9 +990,8 @@ fn unpack_bulk_string(value: &Value) -> Result<&str> {
 fn handle_echo(args: &[Value]) -> Result<Value> {
     if args.is_empty() {
         bail!(RedisError::InvalidArgument)
-    } else {
-        Ok(args[0].clone())
     }
+    Ok(args[0].clone())
 }
 
 // SET key value [PX milliseconds]
@@ -1006,7 +1013,6 @@ pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
             };
             Some(SystemTime::now() + Duration::from_millis(ms))
         }
-        Some(Value::Bulk(_)) => bail!(RedisError::SyntaxError),
         Some(_) => bail!(RedisError::SyntaxError),
         None => None,
     };
@@ -1067,7 +1073,7 @@ pub fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
 }
 
 // RPUSH key element [element ...]
-pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
+pub fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
         bail!(RedisError::InvalidArgument)
     }
@@ -1076,7 +1082,7 @@ pub async fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
         .iter()
         .map(unpack_bulk_string)
         .collect::<Result<Vec<_>>>()?;
-    let count = store.rpush(key, &elements).await?;
+    let count = store.rpush(key, &elements)?;
     Ok(Value::Integer(count))
 }
 
@@ -1093,13 +1099,13 @@ pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
                 if parsed < 0 {
                     bail!(RedisError::InvalidInteger)
                 }
-                Some(parsed as usize)
+                Some(usize::try_from(parsed).unwrap_or(usize::MAX))
             }
             Value::Integer(c) => {
                 if *c < 0 {
                     bail!(RedisError::InvalidInteger)
                 }
-                Some(*c as usize)
+                Some(usize::try_from(*c).unwrap_or(usize::MAX))
             }
             _ => bail!(RedisError::SyntaxError),
         }
@@ -1119,7 +1125,7 @@ pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
 }
 
 // LPUSH key element [element ...]
-pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
+pub fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 2 {
         bail!(RedisError::InvalidArgument)
     }
@@ -1128,7 +1134,7 @@ pub async fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
         .iter()
         .map(unpack_bulk_string)
         .collect::<Result<Vec<_>>>()?;
-    let count = store.lpush(key, &elements).await?;
+    let count = store.lpush(key, &elements)?;
     Ok(Value::Integer(count))
 }
 
@@ -1156,6 +1162,7 @@ pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
 }
 
 // ZADD key score member [score member ...]
+#[allow(clippy::similar_names)]
 pub fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
     if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
         bail!(RedisError::InvalidArgument);
@@ -1189,6 +1196,7 @@ pub fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
 }
 
 // GEOADD key longitude latitude member [longitude latitude member ...]
+#[allow(clippy::similar_names, clippy::cast_precision_loss)]
 pub fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
     let arg_len = args.len();
     if arg_len < 4 || !(arg_len - 1).is_multiple_of(3) {

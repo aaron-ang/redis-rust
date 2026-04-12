@@ -12,10 +12,9 @@ use sha2::{Digest, Sha256};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
-    sync::mpsc,
-    task::JoinHandle,
     time::{sleep, Duration, Instant},
 };
+use tokio_stream::{wrappers::BroadcastStream, StreamExt, StreamMap};
 
 use crate::config::Config;
 use crate::data::{Store, StreamValue};
@@ -35,9 +34,7 @@ enum ClientMode {
         queued_commands: Vec<Value>,
     },
     Subscribed {
-        sub_tx: mpsc::Sender<(String, String)>,
-        sub_rx: mpsc::Receiver<(String, String)>,
-        forwarders: HashMap<String, JoinHandle<()>>,
+        subscriptions: StreamMap<String, BroadcastStream<String>>,
     },
 }
 
@@ -158,20 +155,17 @@ impl Server {
 
     pub async fn handle_conn(&mut self) -> Result<()> {
         loop {
-            if let ClientMode::Subscribed { sub_rx, .. } = &mut self.mode {
+            if let ClientMode::Subscribed { subscriptions } = &mut self.mode {
                 // Subscribed mode: select between incoming messages and client commands
                 tokio::select! {
-                    maybe_msg = sub_rx.recv() => {
-                        if let Some((channel, msg)) = maybe_msg {
+                    Some((channel, msg)) = subscriptions.next() => {
+                        if let Ok(msg) = msg {
                             let response = Value::Array(vec![
                                 Value::Bulk("message".into()),
                                 Value::Bulk(channel),
                                 Value::Bulk(msg),
                             ]);
                             self.conn.write_value(&response).await?;
-                        } else {
-                            // All senders dropped; exit subscribed mode
-                            self.mode = ClientMode::Normal;
                         }
                     }
                     read = self.conn.read_value() => {
@@ -583,44 +577,28 @@ impl Server {
             .map(unpack_bulk_string)
             .collect::<Result<Vec<_>>>()?;
 
-        // Ensure we're in Subscribed mode, creating the fan-in channel if needed.
+        // Ensure we're in Subscribed mode
         if !matches!(self.mode, ClientMode::Subscribed { .. }) {
-            let (tx, rx) = mpsc::channel(64);
             self.mode = ClientMode::Subscribed {
-                sub_tx: tx,
-                sub_rx: rx,
-                forwarders: HashMap::new(),
+                subscriptions: StreamMap::new(),
             };
         }
-        let ClientMode::Subscribed {
-            sub_tx, forwarders, ..
-        } = &mut self.mode
-        else {
+        let ClientMode::Subscribed { subscriptions } = &mut self.mode else {
             unreachable!()
         };
 
-        // Add new subscriptions and spawn forwarders
         for channel in channels {
-            if forwarders.contains_key(channel) {
+            if subscriptions.contains_key(channel) {
                 continue;
             }
 
-            let mut broadcast_rx = self.config.pubsub.subscribe(channel);
-            let tx = sub_tx.clone();
-            let channel_name = channel.to_string();
-            let handle = tokio::spawn(async move {
-                while let Ok(msg) = broadcast_rx.recv().await {
-                    if tx.send((channel_name.clone(), msg)).await.is_err() {
-                        break;
-                    }
-                }
-            });
-            forwarders.insert(channel.to_string(), handle);
+            let broadcast_rx = self.config.pubsub.subscribe(channel);
+            subscriptions.insert(channel.to_string(), BroadcastStream::new(broadcast_rx));
 
             let response = Value::Array(vec![
                 Value::Bulk("subscribe".into()),
                 Value::Bulk(channel.into()),
-                Value::Integer(forwarders.len() as i64),
+                Value::Integer(subscriptions.len() as i64),
             ]);
             self.conn.write_value(&response).await?;
         }
@@ -639,8 +617,8 @@ impl Server {
 
     // UNSUBSCRIBE [channel [channel ...]]
     async fn handle_unsubscribe(&mut self, args: &[Value]) -> Result<Option<Value>> {
-        let forwarders = match &mut self.mode {
-            ClientMode::Subscribed { forwarders, .. } => forwarders,
+        let subscriptions = match &mut self.mode {
+            ClientMode::Subscribed { subscriptions } => subscriptions,
             _ => {
                 return Ok(Some(Value::Array(vec![
                     Value::Bulk("unsubscribe".into()),
@@ -656,24 +634,22 @@ impl Server {
             .collect::<Result<Vec<_>>>()?;
 
         let target_channels: Vec<String> = if channels.is_empty() {
-            forwarders.keys().cloned().collect()
+            subscriptions.keys().cloned().collect()
         } else {
             channels.iter().map(|c| c.to_string()).collect()
         };
 
         for channel in target_channels {
-            if let Some(handle) = forwarders.remove(&channel) {
-                handle.abort();
-            }
+            subscriptions.remove(&channel);
             let response = Value::Array(vec![
                 Value::Bulk("unsubscribe".into()),
                 Value::Bulk(channel),
-                Value::Integer(forwarders.len() as i64),
+                Value::Integer(subscriptions.len() as i64),
             ]);
             self.conn.write_value(&response).await?;
         }
 
-        if forwarders.is_empty() {
+        if subscriptions.is_empty() {
             self.mode = ClientMode::Normal;
         }
 

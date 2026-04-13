@@ -2,7 +2,7 @@ use resp::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use codecrafters_redis::{Config, ReplicaType, Server, Store};
+use redis_rust::{Config, ReplicaType, Server, Store};
 
 async fn setup_test_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

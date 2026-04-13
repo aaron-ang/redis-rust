@@ -27,9 +27,9 @@ This Redis implementation has been benchmarked against the official Redis server
 
 | Implementation          | Ops/sec | KB/sec  | Avg Latency (ms) |
 | ----------------------- | ------- | ------- | ---------------- |
-| **Redis (Baseline)**    | 130,054 | 135,560 | 23.1             |
-| **Rust Implementation** | 173,509 | 180,854 | 17.3             |
-| **Improvement**         | +33%    | +33%    | +25%             |
+| **Redis (Baseline)**    | 293,225 | 305,637 | 10.2             |
+| **Rust Implementation** | 397,667 | 414,500 | 7.5              |
+| **Improvement**         | +35%    | +35%    | +26%             |
 
 ## Latency Benchmark
 
@@ -44,11 +44,11 @@ This Redis implementation has been benchmarked against the official Redis server
 
 ![Latency by Percentile Distribution](assets/latency.png)
 
-| Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) | Max (ms) |
-| ----------------------- | --------- | -------- | -------- | ---------- | -------- |
-| **Redis (Baseline)**    | 4.01      | 4.00     | 5.82     | 10.24      | 81.41    |
-| **Rust Implementation** | 3.83      | 3.83     | 4.67     | 7.42       | 54.78    |
-| **Improvement**         | +4%       | +4%      | +20%     | +28%       | +33%     |
+| Implementation          | Mean (ms) | p50 (ms) | p99 (ms) | p99.9 (ms) |
+| ----------------------- | --------- | -------- | -------- | ---------- |
+| **Redis (Baseline)**    | 2.04      | 1.94     | 3.92     | 6.08       |
+| **Rust Implementation** | 1.44      | 1.30     | 4.29     | 6.43       |
+| **Improvement**         | +29%      | +33%     | -9%      | -6%        |
 
 ## Running Benchmarks
 

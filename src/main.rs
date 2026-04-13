@@ -1,3 +1,6 @@
+#[global_allocator]
+static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 use std::{
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
@@ -7,7 +10,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use codecrafters_redis::{Config, Follower, ReplicaType, Server, Store};
+use redis_rust::{Config, Follower, ReplicaType, Server, Store};
 
 const PORT: u16 = 6379;
 

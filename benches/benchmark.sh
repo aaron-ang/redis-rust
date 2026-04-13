@@ -96,31 +96,35 @@ run_latency_benchmark() {
         --hdr-file-prefix="out/${prefix}"
 }
 
-echo "=== Benchmark 1: Rust Implementation ==="
+OURS="redis-rust"
+REDIS_VERSION=$(redis-server --version | grep -oP 'v=\K[0-9.]+')
+BASELINE="redis v${REDIS_VERSION}"
+
+echo "=== Benchmark 1: ${OURS} ==="
 cargo build --release --quiet
 cargo run --release &>/dev/null &
 REDIS_PID=$!
 wait_for_server
 
-load_data "redis-rs"
-run_throughput_benchmark "redis-rs"
-run_latency_benchmark "redis-rs"
+load_data "${OURS}"
+run_throughput_benchmark "${OURS}"
+run_latency_benchmark "${OURS}"
 cleanup
 
-echo "=== Benchmark 2: Redis Baseline ==="
+echo "=== Benchmark 2: ${BASELINE} ==="
 redis-server --save "" &>/dev/null &
 REDIS_PID=$!
 wait_for_server
 
-load_data "baseline"
-run_throughput_benchmark "baseline"
-run_latency_benchmark "baseline"
+load_data "${BASELINE}"
+run_throughput_benchmark "${BASELINE}"
+run_latency_benchmark "${BASELINE}"
 cleanup
 
 echo "=== Generating latency chart ==="
 uv run "$SCRIPT_DIR/plot_latency.py" \
-    out/redis-rs_FULL_RUN_1.txt \
-    out/baseline_FULL_RUN_1.txt \
+    "out/${OURS}_FULL_RUN_1.txt" \
+    "out/${BASELINE}_FULL_RUN_1.txt" \
     -o ../assets/latency.png
 
 echo "Benchmark completed!"

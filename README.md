@@ -9,7 +9,7 @@ It aims to replicate core Redis functionalities, including event loops and the R
 
 # Performance Benchmarks 📊
 
-This Redis implementation has been benchmarked against the official Redis server to measure both throughput and latency characteristics using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure's Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
+This Redis implementation has been benchmarked against Redis server v8.2.3 (jemalloc-5.3.0) to measure both throughput and latency characteristics using the `memtier_benchmark` tool with configuration guidelines inspired by [Microsoft Azure's Redis best practices](https://learn.microsoft.com/en-us/azure/redis/best-practices-performance).
 
 ## Throughput Benchmark
 

@@ -1,4 +1,5 @@
 mod aof;
+pub(crate) mod args;
 mod follower;
 mod pubsub;
 mod replication;

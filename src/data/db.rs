@@ -34,7 +34,7 @@ pub enum RecordType {
 }
 
 pub struct RedisData {
-    record: RecordType,
+    pub(super) record: RecordType,
     expiry: Option<SystemTime>,
 }
 
@@ -43,21 +43,21 @@ impl RedisData {
         RedisData { record, expiry }
     }
 
-    fn new_stream(key: &str) -> Self {
+    pub(super) fn new_stream(key: &str) -> Self {
         RedisData {
             record: RecordType::Stream(StreamRecord::new(key)),
             expiry: None,
         }
     }
 
-    fn new_sorted_set() -> Self {
+    pub(super) fn new_sorted_set() -> Self {
         RedisData {
             record: RecordType::SortedSet(SortedSetRecord::new()),
             expiry: None,
         }
     }
 
-    fn is_expired(&self) -> bool {
+    pub(super) fn is_expired(&self) -> bool {
         let Some(expiry) = self.expiry else {
             return false;
         };
@@ -67,7 +67,7 @@ impl RedisData {
 
 #[derive(Default)]
 pub struct Store {
-    entries: Arc<DashMap<String, RedisData, RandomState>>,
+    pub(super) entries: Arc<DashMap<String, RedisData, RandomState>>,
     list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>, RandomState>>,
     watchers: DashMap<String, Vec<Arc<AtomicBool>>, RandomState>,
 }
@@ -163,6 +163,7 @@ impl Store {
     }
 
     pub fn set(&self, key: String, value: StringRecord, expiry: Option<SystemTime>) {
+        self.notify_watchers(&key);
         self.entries
             .insert(key, RedisData::new(RecordType::String(value), expiry));
     }
@@ -170,32 +171,18 @@ impl Store {
     /// # Errors
     /// Returns `WrongType` if the key holds a non-string value.
     pub fn incr(&self, key: &str) -> Result<i64> {
-        let mut entry = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| RedisData::new(RecordType::String(StringRecord::Integer(0)), None));
-        let RecordType::String(string_rec) = &mut entry.record else {
-            bail!(RedisError::WrongType);
-        };
-        string_rec.incr()
+        self.with_record_mut(key, |rec: &mut StringRecord| Ok((rec.incr()?, true)))
     }
 
     /// # Errors
     /// Returns `WrongType` if the key holds a non-list value.
     pub fn rpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
-        let len = {
-            let mut entry = self
-                .entries
-                .entry(key.to_string())
-                .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
-            let RecordType::List(list) = &mut entry.record else {
-                bail!(RedisError::WrongType);
-            };
+        let len = self.with_record_mut(key, |list: &mut VecDeque<String>| {
             for element in elements {
                 list.push_back(element.to_string());
             }
-            i64::try_from(list.len()).unwrap_or(i64::MAX)
-        };
+            Ok((i64::try_from(list.len()).unwrap_or(i64::MAX), true))
+        })?;
         self.notify_list_waiters(key);
         Ok(len)
     }
@@ -212,13 +199,14 @@ impl Store {
         loop {
             // 1. Non-blocking check for data, respecting key order.
             for &key in keys {
-                if let Some(mut entry) = self.entries.get_mut(key) {
-                    let RecordType::List(list) = &mut entry.record else {
-                        bail!(RedisError::WrongType);
-                    };
-                    if let Some(val) = list.pop_front() {
-                        return Ok(Some((key.to_string(), val)));
-                    }
+                let popped: Option<String> =
+                    self.with_record_get_mut(key, |list: &mut VecDeque<String>| {
+                        let popped = list.pop_front();
+                        let changed = popped.is_some();
+                        Ok((popped, changed))
+                    })?;
+                if let Some(val) = popped {
+                    return Ok(Some((key.to_string(), val)));
                 }
             }
 
@@ -255,40 +243,29 @@ impl Store {
     /// # Errors
     /// Returns `WrongType` if the key holds a non-list value.
     pub fn lpop(&self, key: &str, count: usize) -> Result<Vec<String>> {
-        let Some(mut entry) = self.entries.get_mut(key) else {
-            return Ok(Vec::new());
-        };
-        let RecordType::List(list) = &mut entry.record else {
-            bail!(RedisError::WrongType);
-        };
-        let mut result = Vec::with_capacity(count);
-        for _ in 0..count {
-            if let Some(val) = list.pop_front() {
-                result.push(val);
-            } else {
-                break;
+        self.with_record_get_mut(key, |list: &mut VecDeque<String>| {
+            let mut result = Vec::with_capacity(count);
+            for _ in 0..count {
+                if let Some(val) = list.pop_front() {
+                    result.push(val);
+                } else {
+                    break;
+                }
             }
-        }
-        Ok(result)
+            let changed = !result.is_empty();
+            Ok((result, changed))
+        })
     }
 
     /// # Errors
     /// Returns `WrongType` if the key holds a non-list value.
     pub fn lpush(&self, key: &str, elements: &[&str]) -> Result<i64> {
-        let len = {
-            let mut entry = self
-                .entries
-                .entry(key.to_string())
-                .or_insert_with(|| RedisData::new(RecordType::List(VecDeque::new()), None));
-
-            let RecordType::List(list) = &mut entry.record else {
-                bail!(RedisError::WrongType);
-            };
+        let len = self.with_record_mut(key, |list: &mut VecDeque<String>| {
             for element in elements {
                 list.push_front(element.to_string());
             }
-            i64::try_from(list.len()).unwrap_or(i64::MAX)
-        };
+            Ok((i64::try_from(list.len()).unwrap_or(i64::MAX), true))
+        })?;
         self.notify_list_waiters(key);
         Ok(len)
     }
@@ -368,19 +345,7 @@ impl Store {
         entry_id: &str,
         values: HashMap<String, String>,
     ) -> Result<StreamEntryId> {
-        let mut entry = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(|| RedisData::new_stream(key));
-
-        if entry.is_expired() || !matches!(entry.record, RecordType::Stream(_)) {
-            *entry = RedisData::new_stream(key);
-        }
-
-        let RecordType::Stream(stream) = &mut entry.record else {
-            bail!(RedisError::WrongType);
-        };
-        stream.xadd(entry_id, values)
+        self.with_stream_mut(key, |stream| Ok((stream.xadd(entry_id, values)?, true)))
     }
 
     /// # Errors
@@ -457,15 +422,9 @@ impl Store {
     /// # Errors
     /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zadd(&self, key: &str, member: &str, score: f64) -> Result<bool> {
-        let mut entry = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(RedisData::new_sorted_set);
-
-        let RecordType::SortedSet(sorted_set) = &mut entry.record else {
-            bail!(RedisError::WrongType);
-        };
-        Ok(sorted_set.add(member, score))
+        self.with_record_mut(key, |s: &mut SortedSetRecord| {
+            Ok((s.add(member, score), true))
+        })
     }
 
     /// # Errors
@@ -507,14 +466,10 @@ impl Store {
     /// # Errors
     /// Returns `WrongType` if the key holds a non-sorted-set value.
     pub fn zrem(&self, key: &str, members: &[&str]) -> Result<i64> {
-        let mut entry = self
-            .entries
-            .entry(key.to_string())
-            .or_insert_with(RedisData::new_sorted_set);
-        let RecordType::SortedSet(sorted_set) = &mut entry.record else {
-            bail!(RedisError::WrongType);
-        };
-        Ok(sorted_set.remove(members))
+        self.with_record_mut(key, |s: &mut SortedSetRecord| {
+            let removed = s.remove(members);
+            Ok((removed, removed > 0))
+        })
     }
 
     /// # Errors

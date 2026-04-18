@@ -471,23 +471,28 @@ impl Server {
         let res = match cmd {
             Command::Get => {
                 let name = unpack_bulk_string(&args[1])?;
-                match name.to_lowercase().as_str() {
-                    "dir" => {
-                        let value = Value::Bulk(
-                            self.config
-                                .dir
-                                .clone()
-                                .into_os_string()
-                                .into_string()
-                                .unwrap_or_default(),
-                        );
-                        Value::Array(vec![Value::Bulk(name.to_string()), value])
-                    }
-                    "dbfilename" => {
-                        let value = Value::Bulk(self.config.dbfilename.clone());
-                        Value::Array(vec![Value::Bulk(name.to_string()), value])
-                    }
-                    _ => Value::Array(vec![]),
+                let lower = name.to_lowercase();
+                let value = match lower.as_str() {
+                    "dir" => Some(Value::Bulk(
+                        self.config
+                            .dir
+                            .clone()
+                            .into_os_string()
+                            .into_string()
+                            .unwrap_or_default(),
+                    )),
+                    "dbfilename" => Some(Value::Bulk(self.config.dbfilename.clone())),
+                    "appendonly" => Some(Value::Bulk(
+                        if self.config.appendonly { "yes" } else { "no" }.to_string(),
+                    )),
+                    "appenddirname" => Some(Value::Bulk(self.config.appenddirname.clone())),
+                    "appendfilename" => Some(Value::Bulk(self.config.appendfilename.clone())),
+                    "appendfsync" => Some(Value::Bulk(self.config.appendfsync.clone())),
+                    _ => None,
+                };
+                match value {
+                    Some(v) => Value::Array(vec![Value::Bulk(lower), v]),
+                    None => Value::Array(vec![]),
                 }
             }
             cmd => bail!("Unsupported CONFIG subcommand: {cmd}"),

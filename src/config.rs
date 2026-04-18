@@ -6,8 +6,10 @@ use dashmap::DashMap;
 use crate::data::Store;
 use crate::network::{PubSub, ReplicaType, ReplicationHub};
 
-const DEFAULT_DIR: &str = ".";
 const DEFAULT_DBFILE: &str = "dump.rdb";
+const DEFAULT_APPENDDIRNAME: &str = "appendonlydir";
+const DEFAULT_APPENDFILENAME: &str = "appendonly.aof";
+const DEFAULT_APPENDFSYNC: &str = "everysec";
 
 /// Flag names by index; index i uses bit (1 << i). Index 0 reserved (empty).
 const FLAG_NAMES: &[&str] = &["", "nopass"];
@@ -59,6 +61,10 @@ pub struct Config {
     pub port: u16,
     pub dir: PathBuf,
     pub dbfilename: String,
+    pub appendonly: bool,
+    pub appenddirname: String,
+    pub appendfilename: String,
+    pub appendfsync: String,
     pub role: ReplicaType,
     pub replicaof: Option<String>,
     pub store: Arc<Store>,
@@ -87,8 +93,13 @@ impl Config {
         );
         Config {
             port,
-            dir: dir.unwrap_or_else(|| PathBuf::from(DEFAULT_DIR)),
+            dir: dir
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             dbfilename: dbfilename.unwrap_or_else(|| DEFAULT_DBFILE.to_string()),
+            appendonly: false,
+            appenddirname: DEFAULT_APPENDDIRNAME.to_string(),
+            appendfilename: DEFAULT_APPENDFILENAME.to_string(),
+            appendfsync: DEFAULT_APPENDFSYNC.to_string(),
             store,
             role,
             replicaof,

@@ -28,6 +28,26 @@ struct Args {
 
     #[arg(long)]
     dbfilename: Option<String>,
+
+    #[arg(long, value_parser = parse_yes_no)]
+    appendonly: Option<bool>,
+
+    #[arg(long)]
+    appenddirname: Option<String>,
+
+    #[arg(long)]
+    appendfilename: Option<String>,
+
+    #[arg(long)]
+    appendfsync: Option<String>,
+}
+
+fn parse_yes_no(s: &str) -> Result<bool, String> {
+    match s.to_ascii_lowercase().as_str() {
+        "yes" => Ok(true),
+        "no" => Ok(false),
+        other => Err(format!("expected 'yes' or 'no', got '{other}'")),
+    }
 }
 
 #[tokio::main]
@@ -67,6 +87,10 @@ fn setup_config() -> Result<Config> {
         args.port,
         args.dir,
         args.dbfilename,
+        args.appendonly,
+        args.appenddirname,
+        args.appendfilename,
+        args.appendfsync,
         store,
         role,
         args.replicaof,

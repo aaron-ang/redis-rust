@@ -58,11 +58,14 @@ async fn main() -> Result<()> {
     if config.appendonly {
         let aof_dir = config.dir.join(&config.appenddirname);
         fs::create_dir_all(&aof_dir)?;
-        let aof_file = aof_dir.join(format!("{}.1.incr.aof", config.appendfilename));
+        let incr_name = format!("{}.1.incr.aof", config.appendfilename);
+        let aof_file = aof_dir.join(&incr_name);
         fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&aof_file)?;
+        let manifest_path = aof_dir.join(format!("{}.manifest", config.appendfilename));
+        fs::write(&manifest_path, format!("file {incr_name} seq 1 type i\n"))?;
     }
 
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);

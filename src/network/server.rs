@@ -261,46 +261,46 @@ impl Server {
         let response = match command {
             Command::Acl => Some(self.handle_acl(args)?),
             Command::Auth => Some(self.handle_auth(args)?),
-            Command::BLPop => Some(handle_blpop(args, &self.config.store).await?),
+            Command::BLPop => Some(self.handle_blpop(args).await?),
             Command::Cmd => Some(Value::Array(vec![])),
             Command::Config => Some(self.handle_config(args)?),
             Command::DbSize => Some(self.handle_db_size()),
             Command::Discard | Command::Exec => bail!(RedisError::CommandWithoutMulti(command)),
             Command::Echo => Some(handle_echo(args)?),
             Command::FlushAll => Some(self.handle_flushall()),
-            Command::GeoAdd => Some(handle_geoadd(args, &self.config.store)?),
+            Command::GeoAdd => Some(self.handle_geoadd(args)?),
             Command::GeoDist => Some(self.handle_geodist(args)?),
             Command::GeoPos => Some(self.handle_geopos(args)?),
             Command::GeoSearch => Some(self.handle_geosearch(args)?),
-            Command::Get => Some(handle_get(args, &self.config.store)?),
-            Command::Incr => Some(handle_incr(args, &self.config.store)?),
+            Command::Get => Some(self.handle_get(args)?),
+            Command::Incr => Some(self.handle_incr(args)?),
             Command::Info => Some(self.handle_info()),
             Command::Keys => Some(self.handle_keys(args)?),
             Command::LLen => Some(self.handle_llen(args)?),
-            Command::LPop => Some(handle_lpop(args, &self.config.store)?),
-            Command::LPush => Some(handle_lpush(args, &self.config.store)?),
+            Command::LPop => Some(self.handle_lpop(args)?),
+            Command::LPush => Some(self.handle_lpush(args)?),
             Command::LRange => Some(self.handle_lrange(args)?),
             Command::Multi => Some(self.handle_multi()),
             Command::Ping => Some(self.handle_ping(args)),
             Command::Publish => Some(self.handle_publish(args)?),
             Command::PSync => self.handle_psync().await?,
             Command::ReplConf => Some(Value::String("OK".into())),
-            Command::RPush => Some(handle_rpush(args, &self.config.store)?),
-            Command::Set => Some(handle_set(args, &self.config.store)?),
+            Command::RPush => Some(self.handle_rpush(args)?),
+            Command::Set => Some(self.handle_set(args)?),
             Command::Subscribe => self.handle_subscribe(args).await?,
             Command::Type => Some(self.handle_type(args)?),
             Command::Unsubscribe => self.handle_unsubscribe(args).await?,
             Command::Unwatch => Some(self.handle_unwatch()),
             Command::Wait => Some(self.handle_wait(args).await?),
             Command::Watch => Some(self.handle_watch(args)?),
-            Command::XAdd => Some(handle_xadd(args, &self.config.store)?),
+            Command::XAdd => Some(self.handle_xadd(args)?),
             Command::XRange => Some(self.handle_xrange(args)?),
             Command::XRead => Some(self.handle_xread(args).await?),
-            Command::ZAdd => Some(handle_zadd(args, &self.config.store)?),
+            Command::ZAdd => Some(self.handle_zadd(args)?),
             Command::ZCard => Some(self.handle_zcard(args)?),
             Command::ZRange => Some(self.handle_zrange(args)?),
             Command::ZRank => Some(self.handle_zrank(args)?),
-            Command::ZRem => Some(handle_zrem(args, &self.config.store)?),
+            Command::ZRem => Some(self.handle_zrem(args)?),
             Command::ZScore => Some(self.handle_zscore(args)?),
         };
 
@@ -1024,234 +1024,245 @@ fn handle_echo(args: &[Value]) -> Result<Value> {
     Ok(args[0].clone())
 }
 
-// SET key value [PX milliseconds]
-pub fn handle_set(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
+/// Command handlers shared between `Server` and `Follower`.
+pub(crate) trait StoreCommands {
+    fn store(&self) -> &Store;
+
+    // SET key value [PX milliseconds]
+    fn handle_set(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let value = unpack_bulk_string(&args[1])?;
+
+        let expiry = match args.get(2) {
+            Some(Value::Bulk(option)) if option.eq_ignore_ascii_case("px") => {
+                let ms = match args.get(3) {
+                    Some(Value::Bulk(arg)) => {
+                        arg.parse::<u64>().map_err(|_| RedisError::InvalidInteger)?
+                    }
+                    _ => bail!(RedisError::SyntaxError),
+                };
+                Some(SystemTime::now() + Duration::from_millis(ms))
+            }
+            Some(_) => bail!(RedisError::SyntaxError),
+            None => None,
+        };
+
+        self.store().set(key.to_string(), value.into(), expiry);
+        Ok(Value::String("OK".into()))
     }
 
-    let key = unpack_bulk_string(&args[0])?;
-    let value = unpack_bulk_string(&args[1])?;
+    // GET key
+    fn handle_get(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        match self.store().get(key) {
+            Some(s) => Ok(Value::Bulk(s.to_string())),
+            None => Ok(Value::Null),
+        }
+    }
 
-    let expiry = match args.get(2) {
-        Some(Value::Bulk(option)) if option.eq_ignore_ascii_case("px") => {
-            let ms = match args.get(3) {
-                Some(Value::Bulk(arg)) => {
-                    arg.parse::<u64>().map_err(|_| RedisError::InvalidInteger)?
+    // XADD key <* | id> field value [field value ...]
+    fn handle_xadd(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let entry_id = unpack_bulk_string(&args[1])?;
+        let values = args[2..]
+            .chunks(2)
+            .map(|pair| match pair {
+                [field, value] => Ok((
+                    unpack_bulk_string(field)?.to_string(),
+                    unpack_bulk_string(value)?.to_string(),
+                )),
+                _ => bail!(RedisError::InvalidArgument),
+            })
+            .collect::<Result<HashMap<_, _>>>()?;
+
+        if values.is_empty() {
+            bail!(RedisError::InvalidArgument)
+        }
+
+        match self.store().add_stream_entry(key, entry_id, values) {
+            Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
+            Err(e) => Ok(Value::Error(e.to_string())),
+        }
+    }
+
+    // INCR key
+    fn handle_incr(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let value = self.store().incr(key)?;
+        Ok(Value::Integer(value))
+    }
+
+    // RPUSH key element [element ...]
+    fn handle_rpush(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let elements = args[1..]
+            .iter()
+            .map(unpack_bulk_string)
+            .collect::<Result<Vec<_>>>()?;
+        let count = self.store().rpush(key, &elements)?;
+        Ok(Value::Integer(count))
+    }
+
+    // LPOP key [count]
+    fn handle_lpop(&self, args: &[Value]) -> Result<Value> {
+        if args.is_empty() {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let count = if let Some(arg) = args.get(1) {
+            match arg {
+                Value::Bulk(c) => {
+                    let parsed = c.parse::<i64>()?;
+                    if parsed < 0 {
+                        bail!(RedisError::InvalidInteger)
+                    }
+                    Some(usize::try_from(parsed).unwrap_or(usize::MAX))
+                }
+                Value::Integer(c) => {
+                    if *c < 0 {
+                        bail!(RedisError::InvalidInteger)
+                    }
+                    Some(usize::try_from(*c).unwrap_or(usize::MAX))
                 }
                 _ => bail!(RedisError::SyntaxError),
-            };
-            Some(SystemTime::now() + Duration::from_millis(ms))
-        }
-        Some(_) => bail!(RedisError::SyntaxError),
-        None => None,
-    };
+            }
+        } else {
+            None
+        };
 
-    store.set(key.to_string(), value.into(), expiry);
-    Ok(Value::String("OK".into()))
-}
+        let elements = self.store().lpop(key, count.unwrap_or(1))?;
 
-// GET key
-pub fn handle_get(args: &[Value], store: &Store) -> Result<Value> {
-    if args.is_empty() {
-        bail!(RedisError::InvalidArgument)
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    match store.get(key) {
-        Some(s) => Ok(Value::Bulk(s.to_string())),
-        None => Ok(Value::Null),
-    }
-}
-
-// XADD key <* | id> field value [field value ...]
-pub fn handle_xadd(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
-    }
-
-    let key = unpack_bulk_string(&args[0])?;
-    let entry_id = unpack_bulk_string(&args[1])?;
-    let values = args[2..]
-        .chunks(2)
-        .map(|pair| match pair {
-            [field, value] => Ok((
-                unpack_bulk_string(field)?.to_string(),
-                unpack_bulk_string(value)?.to_string(),
+        match (elements.is_empty(), count) {
+            (true, _) => Ok(Value::Null),
+            (false, None) => Ok(Value::Bulk(elements[0].clone())),
+            (false, Some(_)) => Ok(Value::Array(
+                elements.into_iter().map(Value::Bulk).collect(),
             )),
-            _ => bail!(RedisError::InvalidArgument),
-        })
-        .collect::<Result<HashMap<_, _>>>()?;
-
-    if values.is_empty() {
-        bail!(RedisError::InvalidArgument)
+        }
     }
 
-    match store.add_stream_entry(key, entry_id, values) {
-        Ok(stream_entry_id) => Ok(Value::Bulk(stream_entry_id.to_string())),
-        Err(e) => Ok(Value::Error(e.to_string())),
+    // LPUSH key element [element ...]
+    fn handle_lpush(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let elements = args[1..]
+            .iter()
+            .map(unpack_bulk_string)
+            .collect::<Result<Vec<_>>>()?;
+        let count = self.store().lpush(key, &elements)?;
+        Ok(Value::Integer(count))
     }
-}
 
-// INC key
-pub fn handle_incr(args: &[Value], store: &Store) -> Result<Value> {
-    if args.is_empty() {
-        bail!(RedisError::InvalidArgument)
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    let value = store.incr(key)?;
-    Ok(Value::Integer(value))
-}
+    // BLPOP key [key ...] timeout
+    async fn handle_blpop(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
 
-// RPUSH key element [element ...]
-pub fn handle_rpush(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    let elements = args[1..]
-        .iter()
-        .map(unpack_bulk_string)
-        .collect::<Result<Vec<_>>>()?;
-    let count = store.rpush(key, &elements)?;
-    Ok(Value::Integer(count))
-}
-
-// LPOP key [count]
-pub fn handle_lpop(args: &[Value], store: &Store) -> Result<Value> {
-    if args.is_empty() {
-        bail!(RedisError::InvalidArgument)
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    let count = if let Some(arg) = args.get(1) {
-        match arg {
-            Value::Bulk(c) => {
-                let parsed = c.parse::<i64>()?;
-                if parsed < 0 {
-                    bail!(RedisError::InvalidInteger)
-                }
-                Some(usize::try_from(parsed).unwrap_or(usize::MAX))
-            }
-            Value::Integer(c) => {
-                if *c < 0 {
-                    bail!(RedisError::InvalidInteger)
-                }
-                Some(usize::try_from(*c).unwrap_or(usize::MAX))
-            }
+        let timeout = match args.last() {
+            Some(Value::Bulk(t)) => t.parse::<f64>()?,
             _ => bail!(RedisError::SyntaxError),
-        }
-    } else {
-        None
-    };
+        };
+        let keys = args[..args.len() - 1]
+            .iter()
+            .map(unpack_bulk_string)
+            .collect::<Result<Vec<_>>>()?;
+        let elements = self.store().blpop(&keys, timeout).await?;
 
-    let elements = store.lpop(key, count.unwrap_or(1))?;
-
-    match (elements.is_empty(), count) {
-        (true, _) => Ok(Value::Null),
-        (false, None) => Ok(Value::Bulk(elements[0].clone())),
-        (false, Some(_)) => Ok(Value::Array(
-            elements.into_iter().map(Value::Bulk).collect(),
-        )),
-    }
-}
-
-// LPUSH key element [element ...]
-pub fn handle_lpush(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    let elements = args[1..]
-        .iter()
-        .map(unpack_bulk_string)
-        .collect::<Result<Vec<_>>>()?;
-    let count = store.lpush(key, &elements)?;
-    Ok(Value::Integer(count))
-}
-
-// BLPOP key [key ...] timeout
-pub async fn handle_blpop(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
-    }
-
-    let timeout = match args.last() {
-        Some(Value::Bulk(t)) => t.parse::<f64>()?,
-        _ => bail!(RedisError::SyntaxError),
-    };
-    let keys = args[..args.len() - 1]
-        .iter()
-        .map(unpack_bulk_string)
-        .collect::<Result<Vec<_>>>()?;
-    let elements = store.blpop(&keys, timeout).await?;
-
-    if let Some((key, value)) = elements {
-        Ok(Value::Array(vec![Value::Bulk(key), Value::Bulk(value)]))
-    } else {
-        Ok(Value::NullArray)
-    }
-}
-
-// ZADD key score member [score member ...]
-#[allow(clippy::similar_names)]
-pub fn handle_zadd(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
-        bail!(RedisError::InvalidArgument);
-    }
-    let key = unpack_bulk_string(&args[0])?;
-    let mut added = 0;
-
-    for i in (1..args.len()).step_by(2) {
-        let score = unpack_bulk_string(&args[i])?.parse::<f64>()?;
-        let member = unpack_bulk_string(&args[i + 1])?;
-        if store.zadd(key, member, score)? {
-            added += 1;
+        if let Some((key, value)) = elements {
+            Ok(Value::Array(vec![Value::Bulk(key), Value::Bulk(value)]))
+        } else {
+            Ok(Value::NullArray)
         }
     }
 
-    Ok(Value::Integer(added))
+    // ZADD key score member [score member ...]
+    #[allow(clippy::similar_names)]
+    fn handle_zadd(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 3 || !(args.len() - 1).is_multiple_of(2) {
+            bail!(RedisError::InvalidArgument);
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let mut added = 0;
+
+        for i in (1..args.len()).step_by(2) {
+            let score = unpack_bulk_string(&args[i])?.parse::<f64>()?;
+            let member = unpack_bulk_string(&args[i + 1])?;
+            if self.store().zadd(key, member, score)? {
+                added += 1;
+            }
+        }
+
+        Ok(Value::Integer(added))
+    }
+
+    // ZREM key member [member ...]
+    fn handle_zrem(&self, args: &[Value]) -> Result<Value> {
+        if args.len() < 2 {
+            bail!(RedisError::InvalidArgument)
+        }
+        let key = unpack_bulk_string(&args[0])?;
+        let members = args[1..]
+            .iter()
+            .map(unpack_bulk_string)
+            .collect::<Result<Vec<_>>>()?;
+        let removed = self.store().zrem(key, &members)?;
+        Ok(Value::Integer(removed))
+    }
+
+    // GEOADD key longitude latitude member [longitude latitude member ...]
+    #[allow(clippy::similar_names, clippy::cast_precision_loss)]
+    fn handle_geoadd(&self, args: &[Value]) -> Result<Value> {
+        let arg_len = args.len();
+        if arg_len < 4 || !(arg_len - 1).is_multiple_of(3) {
+            bail!(RedisError::InvalidArgument)
+        }
+
+        let key = unpack_bulk_string(&args[0])?;
+        let mut parsed_entries = Vec::with_capacity((arg_len - 1) / 3);
+        for chunk in args[1..].chunks(3) {
+            let longitude = unpack_bulk_string(&chunk[0])?.parse::<f64>()?;
+            let latitude = unpack_bulk_string(&chunk[1])?.parse::<f64>()?;
+            let member = unpack_bulk_string(&chunk[2])?;
+            if !is_valid_coordinate(latitude, longitude) {
+                bail!(RedisError::InvalidCoordinates(longitude, latitude))
+            }
+            parsed_entries.push((longitude, latitude, member));
+        }
+
+        let mut added = 0;
+        for (longitude, latitude, member) in parsed_entries {
+            let score = encode(latitude, longitude);
+            if self.store().zadd(key, member, score as f64)? {
+                added += 1;
+            }
+        }
+
+        Ok(Value::Integer(added))
+    }
 }
 
-// ZREM key member [member ...]
-pub fn handle_zrem(args: &[Value], store: &Store) -> Result<Value> {
-    if args.len() < 2 {
-        bail!(RedisError::InvalidArgument)
+impl StoreCommands for Server {
+    fn store(&self) -> &Store {
+        &self.config.store
     }
-    let key = unpack_bulk_string(&args[0])?;
-    let members = args[1..]
-        .iter()
-        .map(unpack_bulk_string)
-        .collect::<Result<Vec<_>>>()?;
-    let removed = store.zrem(key, &members)?;
-    Ok(Value::Integer(removed))
-}
-
-// GEOADD key longitude latitude member [longitude latitude member ...]
-#[allow(clippy::similar_names, clippy::cast_precision_loss)]
-pub fn handle_geoadd(args: &[Value], store: &Store) -> Result<Value> {
-    let arg_len = args.len();
-    if arg_len < 4 || !(arg_len - 1).is_multiple_of(3) {
-        bail!(RedisError::InvalidArgument)
-    }
-
-    let key = unpack_bulk_string(&args[0])?;
-    let mut parsed_entries = Vec::with_capacity((arg_len - 1) / 3);
-    for chunk in args[1..].chunks(3) {
-        let longitude = unpack_bulk_string(&chunk[0])?.parse::<f64>()?;
-        let latitude = unpack_bulk_string(&chunk[1])?.parse::<f64>()?;
-        let member = unpack_bulk_string(&chunk[2])?;
-        if !is_valid_coordinate(latitude, longitude) {
-            bail!(RedisError::InvalidCoordinates(longitude, latitude))
-        }
-        parsed_entries.push((longitude, latitude, member));
-    }
-
-    let mut added = 0;
-    for (longitude, latitude, member) in parsed_entries {
-        let score = encode(latitude, longitude);
-        if store.zadd(key, member, score as f64)? {
-            added += 1;
-        }
-    }
-
-    Ok(Value::Integer(added))
 }

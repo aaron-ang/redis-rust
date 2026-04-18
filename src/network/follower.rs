@@ -15,7 +15,7 @@ use crate::data::Store;
 use crate::types::Command;
 
 use super::resp::{encode_into, resp_encoded_len};
-use super::server::{self, BUFFER_SIZE, EMPTY_RDB_B64};
+use super::server::{self, StoreCommands, BUFFER_SIZE, EMPTY_RDB_B64};
 
 const PSYNC_RESPONSE_LEN: usize = 56;
 
@@ -74,36 +74,36 @@ impl Follower {
     async fn handle_command(&mut self, command: Command, args: &[Value]) -> Result<()> {
         match command {
             Command::BLPop => {
-                server::handle_blpop(args, &self.store).await?;
+                self.handle_blpop(args).await?;
             }
             Command::Get => {
-                server::handle_get(args, &self.store)?;
+                self.handle_get(args)?;
             }
             Command::Incr => {
-                server::handle_incr(args, &self.store)?;
+                self.handle_incr(args)?;
             }
             Command::Ping => {}
             Command::LPop => {
-                server::handle_lpop(args, &self.store)?;
+                self.handle_lpop(args)?;
             }
             Command::LPush => {
-                server::handle_lpush(args, &self.store)?;
+                self.handle_lpush(args)?;
             }
             Command::ReplConf => self.handle_replconf().await?,
             Command::RPush => {
-                server::handle_rpush(args, &self.store)?;
+                self.handle_rpush(args)?;
             }
             Command::Set => {
-                server::handle_set(args, &self.store)?;
+                self.handle_set(args)?;
             }
             Command::XAdd => {
-                server::handle_xadd(args, &self.store)?;
+                self.handle_xadd(args)?;
             }
             Command::ZAdd => {
-                server::handle_zadd(args, &self.store)?;
+                self.handle_zadd(args)?;
             }
             Command::ZRem => {
-                server::handle_zrem(args, &self.store)?;
+                self.handle_zrem(args)?;
             }
             _ => eprintln!("Unknown command: {command}"),
         }
@@ -222,5 +222,11 @@ impl Follower {
             Value::Bulk(self.offset.to_string()),
         ]);
         self.send_command(replconf_ack).await
+    }
+}
+
+impl StoreCommands for Follower {
+    fn store(&self) -> &Store {
+        &self.store
     }
 }

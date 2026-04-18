@@ -2,7 +2,7 @@ use resp::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_rust::{Config, ReplicaType, Server, Store};
+use redis_rust::{AofOptions, Config, ReplicaType, Server, Store};
 
 async fn setup_test_server() -> (u16, tokio::task::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -12,7 +12,15 @@ async fn setup_test_server() -> (u16, tokio::task::JoinHandle<()>) {
 
     let handle = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
-            let config = Config::new(port, None, None, store.clone(), ReplicaType::Leader, None);
+            let config = Config::new(
+                port,
+                None,
+                None,
+                AofOptions::default(),
+                store.clone(),
+                ReplicaType::Leader,
+                None,
+            );
             tokio::spawn(async move {
                 let _ = Server::new(config, stream).handle_conn().await;
             });

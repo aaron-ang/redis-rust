@@ -2,6 +2,7 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{
+    fs,
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
 };
@@ -10,7 +11,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_rust::{Config, Follower, ReplicaType, Server, Store};
+use redis_rust::{AofOptions, Config, Follower, ReplicaType, Server, Store};
 
 const PORT: u16 = 6379;
 
@@ -56,7 +57,12 @@ async fn main() -> Result<()> {
 
     if config.appendonly {
         let aof_dir = config.dir.join(&config.appenddirname);
-        std::fs::create_dir_all(&aof_dir)?;
+        fs::create_dir_all(&aof_dir)?;
+        let aof_file = aof_dir.join(format!("{}.1.incr.aof", config.appendfilename));
+        fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&aof_file)?;
     }
 
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
@@ -88,14 +94,18 @@ fn setup_config() -> Result<Config> {
     let store = Store::from_path(&args.dir, &args.dbfilename)?;
     let role = determine_role(&args);
 
+    let aof = AofOptions {
+        appendonly: args.appendonly,
+        appenddirname: args.appenddirname,
+        appendfilename: args.appendfilename,
+        appendfsync: args.appendfsync,
+    };
+
     Ok(Config::new(
         args.port,
         args.dir,
         args.dbfilename,
-        args.appendonly,
-        args.appenddirname,
-        args.appendfilename,
-        args.appendfsync,
+        aof,
         store,
         role,
         args.replicaof,

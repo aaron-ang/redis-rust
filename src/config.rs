@@ -56,6 +56,14 @@ pub struct AclUser {
     pub passwords: Vec<String>,
 }
 
+#[derive(Default)]
+pub struct AofOptions {
+    pub appendonly: Option<bool>,
+    pub appenddirname: Option<String>,
+    pub appendfilename: Option<String>,
+    pub appendfsync: Option<String>,
+}
+
 #[derive(Clone)]
 pub struct Config {
     pub port: u16,
@@ -79,10 +87,7 @@ impl Config {
         port: u16,
         dir: Option<PathBuf>,
         dbfilename: Option<String>,
-        appendonly: Option<bool>,
-        appenddirname: Option<String>,
-        appendfilename: Option<String>,
-        appendfsync: Option<String>,
+        aof: AofOptions,
         store: Arc<Store>,
         role: ReplicaType,
         replicaof: Option<String>,
@@ -100,10 +105,16 @@ impl Config {
             dir: dir
                 .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))),
             dbfilename: dbfilename.unwrap_or_else(|| DEFAULT_DBFILE.to_string()),
-            appendonly: appendonly.unwrap_or(false),
-            appenddirname: appenddirname.unwrap_or_else(|| DEFAULT_APPENDDIRNAME.to_string()),
-            appendfilename: appendfilename.unwrap_or_else(|| DEFAULT_APPENDFILENAME.to_string()),
-            appendfsync: appendfsync.unwrap_or_else(|| DEFAULT_APPENDFSYNC.to_string()),
+            appendonly: aof.appendonly.unwrap_or(false),
+            appenddirname: aof
+                .appenddirname
+                .unwrap_or_else(|| DEFAULT_APPENDDIRNAME.to_string()),
+            appendfilename: aof
+                .appendfilename
+                .unwrap_or_else(|| DEFAULT_APPENDFILENAME.to_string()),
+            appendfsync: aof
+                .appendfsync
+                .unwrap_or_else(|| DEFAULT_APPENDFSYNC.to_string()),
             store,
             role,
             replicaof,

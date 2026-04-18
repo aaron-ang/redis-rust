@@ -2,16 +2,16 @@
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 use std::{
-    fs,
     net::{Ipv4Addr, SocketAddrV4},
     path::PathBuf,
+    sync::Arc,
 };
 
 use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_rust::{AofOptions, Config, Follower, ReplicaType, Server, Store};
+use redis_rust::{AofOptions, AofWriter, Config, Follower, ReplicaType, Server, Store};
 
 const PORT: u16 = 6379;
 
@@ -53,19 +53,17 @@ fn parse_yes_no(s: &str) -> Result<bool, String> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let config = setup_config()?;
+    let mut config = setup_config()?;
 
     if config.appendonly {
-        let aof_dir = config.dir.join(&config.appenddirname);
-        fs::create_dir_all(&aof_dir)?;
-        let incr_name = format!("{}.1.incr.aof", config.appendfilename);
-        let aof_file = aof_dir.join(&incr_name);
-        fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&aof_file)?;
-        let manifest_path = aof_dir.join(format!("{}.manifest", config.appendfilename));
-        fs::write(&manifest_path, format!("file {incr_name} seq 1 type i\n"))?;
+        let fsync_always = config.appendfsync.eq_ignore_ascii_case("always");
+        let writer = AofWriter::setup(
+            &config.dir,
+            &config.appenddirname,
+            &config.appendfilename,
+            fsync_always,
+        )?;
+        config.aof = Some(Arc::new(writer));
     }
 
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);

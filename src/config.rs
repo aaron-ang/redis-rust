@@ -4,7 +4,7 @@ use ahash::RandomState;
 use dashmap::DashMap;
 
 use crate::data::Store;
-use crate::network::{PubSub, ReplicaType, ReplicationHub};
+use crate::network::{AofWriter, PubSub, ReplicaType, ReplicationHub};
 
 const DEFAULT_DBFILE: &str = "dump.rdb";
 const DEFAULT_APPENDDIRNAME: &str = "appendonlydir";
@@ -79,6 +79,7 @@ pub struct Config {
     pub replication: Arc<ReplicationHub>,
     pub pubsub: Arc<PubSub>,
     pub acl_users: Arc<DashMap<String, AclUser, RandomState>>,
+    pub aof: Option<Arc<AofWriter>>,
 }
 
 impl Config {
@@ -121,6 +122,7 @@ impl Config {
             replication: Arc::new(ReplicationHub::default()),
             pubsub: Arc::new(PubSub::default()),
             acl_users,
+            aof: None,
         }
     }
 }

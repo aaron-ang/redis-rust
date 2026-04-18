@@ -14,7 +14,8 @@ use tokio::{
 use crate::data::Store;
 use crate::types::Command;
 
-use super::server::{self, encode_into, resp_encoded_len, BUFFER_SIZE, EMPTY_RDB_B64};
+use super::resp::{encode_into, resp_encoded_len};
+use super::server::{self, BUFFER_SIZE, EMPTY_RDB_B64};
 
 const PSYNC_RESPONSE_LEN: usize = 56;
 

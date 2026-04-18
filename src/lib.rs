@@ -6,4 +6,4 @@ mod types;
 
 pub use config::{AofOptions, Config};
 pub use data::Store;
-pub use network::{Follower, PubSub, ReplicaType, Server};
+pub use network::{AofWriter, Follower, PubSub, ReplicaType, Server};

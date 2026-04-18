@@ -8,7 +8,8 @@ use redis_rust::AofWriter;
 #[test]
 fn setup_creates_dir_file_and_manifest_when_missing() {
     let tmp = tempdir().unwrap();
-    let writer = AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", false).unwrap();
+    let (writer, _) =
+        AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", false).unwrap();
     drop(writer);
 
     let aof_dir = tmp.path().join("appendonlydir");
@@ -26,6 +27,41 @@ fn setup_creates_dir_file_and_manifest_when_missing() {
 }
 
 #[test]
+fn setup_returns_existing_commands_for_replay() {
+    let tmp = tempdir().unwrap();
+    let aof_dir = tmp.path().join("appendonlydir");
+    fs::create_dir_all(&aof_dir).unwrap();
+
+    let random_incr = "abc.1.incr.aof";
+    fs::write(
+        aof_dir.join(random_incr),
+        b"*3\r\n$3\r\nSET\r\n$1\r\nk\r\n$1\r\nv\r\n*2\r\n$4\r\nINCR\r\n$1\r\nk\r\n",
+    )
+    .unwrap();
+    fs::write(
+        aof_dir.join("appendonly.aof.manifest"),
+        format!("file {random_incr} seq 1 type i\n"),
+    )
+    .unwrap();
+
+    let (_writer, commands) =
+        AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", false).unwrap();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(
+        commands[0],
+        Value::Array(vec![
+            Value::Bulk("SET".into()),
+            Value::Bulk("k".into()),
+            Value::Bulk("v".into()),
+        ])
+    );
+    assert_eq!(
+        commands[1],
+        Value::Array(vec![Value::Bulk("INCR".into()), Value::Bulk("k".into()),])
+    );
+}
+
+#[test]
 fn setup_reuses_existing_manifest_incr_filename() {
     let tmp = tempdir().unwrap();
     let aof_dir = tmp.path().join("appendonlydir");
@@ -39,7 +75,8 @@ fn setup_reuses_existing_manifest_incr_filename() {
     )
     .unwrap();
 
-    let writer = AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", true).unwrap();
+    let (writer, _) =
+        AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", true).unwrap();
     writer
         .append(&Value::Array(vec![
             Value::Bulk("SET".into()),
@@ -75,7 +112,8 @@ fn setup_errors_on_malformed_manifest() {
 #[test]
 fn append_concatenates_multiple_commands() {
     let tmp = tempdir().unwrap();
-    let writer = AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", false).unwrap();
+    let (writer, _) =
+        AofWriter::setup(tmp.path(), "appendonlydir", "appendonly.aof", false).unwrap();
 
     writer
         .append(&Value::Array(vec![

@@ -6,7 +6,7 @@ mod replication;
 pub(crate) mod resp;
 mod server;
 
-pub use aof::AofWriter;
+pub use aof::{AofReplayer, AofWriter};
 pub use follower::Follower;
 pub use pubsub::PubSub;
 pub use replication::{ReplicaType, ReplicationHub};

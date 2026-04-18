@@ -1125,6 +1125,46 @@ pub(crate) trait StoreCommands {
 
         Ok(Value::Integer(added))
     }
+
+    /// Dispatch a single write command against the store. Used for AOF replay
+    /// and replication streams where only mutation effects matter.
+    async fn dispatch_write(&self, cmd: &Value) -> Result<()> {
+        let (command, args) = extract_command(cmd)?;
+        match command {
+            Command::Set => {
+                self.handle_set(args)?;
+            }
+            Command::Incr => {
+                self.handle_incr(args)?;
+            }
+            Command::LPush => {
+                self.handle_lpush(args)?;
+            }
+            Command::RPush => {
+                self.handle_rpush(args)?;
+            }
+            Command::LPop => {
+                self.handle_lpop(args)?;
+            }
+            Command::BLPop => {
+                self.handle_blpop(args).await?;
+            }
+            Command::XAdd => {
+                self.handle_xadd(args)?;
+            }
+            Command::ZAdd => {
+                self.handle_zadd(args)?;
+            }
+            Command::ZRem => {
+                self.handle_zrem(args)?;
+            }
+            Command::GeoAdd => {
+                self.handle_geoadd(args)?;
+            }
+            _ => bail!("unsupported command in AOF replay: {command}"),
+        }
+        Ok(())
+    }
 }
 
 impl StoreCommands for Server {

@@ -1,14 +1,17 @@
 use std::{
     fs::{self, File, OpenOptions},
-    io::Write,
+    io::{BufReader, ErrorKind, Write},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use anyhow::{bail, Result};
-use resp::Value;
+use resp::{Decoder, Value};
+
+use crate::data::Store;
 
 use super::resp::{encode_into, resp_encoded_len};
+use super::server::StoreCommands;
 
 pub struct AofWriter {
     file: Mutex<File>,
@@ -26,7 +29,7 @@ impl AofWriter {
         appenddirname: &str,
         appendfilename: &str,
         fsync_always: bool,
-    ) -> Result<Self> {
+    ) -> Result<(Self, Vec<Value>)> {
         let aof_dir = dir.join(appenddirname);
         fs::create_dir_all(&aof_dir)?;
 
@@ -40,15 +43,20 @@ impl AofWriter {
         };
 
         let incr_path = aof_dir.join(&incr_name);
+        let existing = read_resp_commands(&incr_path)?;
+
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&incr_path)?;
 
-        Ok(AofWriter {
-            file: Mutex::new(file),
-            fsync_always,
-        })
+        Ok((
+            AofWriter {
+                file: Mutex::new(file),
+                fsync_always,
+            },
+            existing,
+        ))
     }
 
     /// Encode a RESP `Value` and append it to the AOF file, fsyncing when configured.
@@ -80,4 +88,52 @@ fn read_active_incr(manifest_path: &PathBuf) -> Result<String> {
         }
     }
     bail!("no active incremental entry in manifest")
+}
+
+fn read_resp_commands(incr_path: &Path) -> Result<Vec<Value>> {
+    if !incr_path.exists() {
+        return Ok(Vec::new());
+    }
+    let bytes = fs::read(incr_path)?;
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut decoder = Decoder::new(BufReader::new(bytes.as_slice()));
+    let mut commands = Vec::new();
+    loop {
+        match decoder.decode() {
+            Ok(value) => commands.push(value),
+            Err(e) if e.kind() == ErrorKind::UnexpectedEof => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(commands)
+}
+
+/// Executes AOF commands against a `Store` at startup, reconstructing
+/// its state from previously persisted write commands.
+pub struct AofReplayer {
+    store: Arc<Store>,
+}
+
+impl AofReplayer {
+    #[must_use]
+    pub fn new(store: Arc<Store>) -> Self {
+        Self { store }
+    }
+
+    /// # Errors
+    /// Returns an error if any command cannot be dispatched.
+    pub async fn replay(&self, commands: Vec<Value>) -> Result<()> {
+        for cmd in commands {
+            self.dispatch_write(&cmd).await?;
+        }
+        Ok(())
+    }
+}
+
+impl StoreCommands for AofReplayer {
+    fn store(&self) -> &Store {
+        &self.store
+    }
 }

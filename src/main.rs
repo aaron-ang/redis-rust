@@ -11,7 +11,9 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_rust::{AofOptions, AofWriter, Config, Follower, ReplicaType, Server, Store};
+use redis_rust::{
+    AofOptions, AofReplayer, AofWriter, Config, Follower, ReplicaType, Server, Store,
+};
 
 const PORT: u16 = 6379;
 
@@ -57,12 +59,17 @@ async fn main() -> Result<()> {
 
     if config.appendonly {
         let fsync_always = config.appendfsync.eq_ignore_ascii_case("always");
-        let writer = AofWriter::setup(
+        let (writer, existing) = AofWriter::setup(
             &config.dir,
             &config.appenddirname,
             &config.appendfilename,
             fsync_always,
         )?;
+        if !existing.is_empty() {
+            AofReplayer::new(config.store.clone())
+                .replay(existing)
+                .await?;
+        }
         config.aof = Some(Arc::new(writer));
     }
 

@@ -3,7 +3,10 @@ use std::{
     collections::{HashMap, VecDeque},
     fs,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 
@@ -66,7 +69,7 @@ impl RedisData {
 pub struct Store {
     entries: Arc<DashMap<String, RedisData, RandomState>>,
     list_waiters: Arc<DashMap<String, VecDeque<oneshot::Sender<()>>, RandomState>>,
-    key_versions: DashMap<String, u64, RandomState>,
+    watchers: DashMap<String, Vec<Arc<AtomicBool>>, RandomState>,
 }
 
 impl Store {
@@ -89,7 +92,7 @@ impl Store {
         Store {
             entries: Arc::new(entries.into_iter().collect()),
             list_waiters: Arc::new(DashMap::with_hasher(RandomState::default())),
-            key_versions: DashMap::with_hasher(RandomState::default()),
+            watchers: DashMap::with_hasher(RandomState::default()),
         }
     }
 
@@ -110,13 +113,30 @@ impl Store {
         }
     }
 
-    pub fn touch_key_version(&self, key: &str) {
-        *self.key_versions.entry(key.to_string()).or_insert(0) += 1;
+    pub fn add_watcher(&self, key: &str, flag: Arc<AtomicBool>) {
+        self.watchers.entry(key.to_string()).or_default().push(flag);
     }
 
-    #[must_use]
-    pub fn get_key_version(&self, key: &str) -> u64 {
-        self.key_versions.get(key).map_or(0, |v| *v)
+    pub fn remove_watcher(&self, key: &str, flag: &Arc<AtomicBool>) {
+        let drop_entry = {
+            let Some(mut list) = self.watchers.get_mut(key) else {
+                return;
+            };
+            list.retain(|f| !Arc::ptr_eq(f, flag));
+            list.is_empty()
+        };
+        if drop_entry {
+            self.watchers.remove_if(key, |_, list| list.is_empty());
+        }
+    }
+
+    pub fn notify_watchers(&self, key: &str) {
+        let Some(list) = self.watchers.get(key) else {
+            return;
+        };
+        for flag in list.iter() {
+            flag.store(true, Ordering::Release);
+        }
     }
 
     #[must_use]

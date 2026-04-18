@@ -2,6 +2,10 @@ use std::{
     collections::HashMap,
     io::{BufReader, ErrorKind},
     str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
     time::SystemTime,
 };
 
@@ -136,7 +140,8 @@ pub struct Server {
     conn: Connection,
     mode: ClientMode,
     authenticated: bool,
-    watched_keys: HashMap<String, u64>,
+    watched_keys: Vec<String>,
+    dirty: Arc<AtomicBool>,
     response_buf: Vec<u8>,
 }
 
@@ -151,9 +156,17 @@ impl Server {
             conn: Connection::new(stream),
             mode: ClientMode::Normal,
             authenticated,
-            watched_keys: HashMap::new(),
+            watched_keys: Vec::new(),
+            dirty: Arc::new(AtomicBool::new(false)),
             response_buf: Vec::with_capacity(512),
         }
+    }
+
+    fn clear_watches(&mut self) {
+        for key in self.watched_keys.drain(..) {
+            self.config.store.remove_watcher(&key, &self.dirty);
+        }
+        self.dirty.store(false, Ordering::Release);
     }
 
     /// # Errors
@@ -305,7 +318,7 @@ impl Server {
                 _ => args.first().and_then(|v| unpack_bulk_string(v).ok()),
             };
             if let Some(key) = key {
-                self.config.store.touch_key_version(key);
+                self.config.store.notify_watchers(key);
             }
             if self.config.role == ReplicaType::Leader && self.config.replication.has_replicas() {
                 self.config.replication.publish(cmd_line);
@@ -326,13 +339,10 @@ impl Server {
                 let ClientMode::Transaction { queued_commands } = &mut self.mode else {
                     bail!("Expected transaction mode")
                 };
-                let watch_violated = self
-                    .watched_keys
-                    .iter()
-                    .any(|(key, &version)| self.config.store.get_key_version(key) != version);
+                let watch_violated = self.dirty.load(Ordering::Acquire);
                 let commands = std::mem::take(queued_commands);
                 self.mode = ClientMode::Normal;
-                self.watched_keys.clear();
+                self.clear_watches();
 
                 if watch_violated {
                     Some(Value::NullArray)
@@ -353,7 +363,7 @@ impl Server {
             }
             Command::Discard => {
                 self.mode = ClientMode::Normal;
-                self.watched_keys.clear();
+                self.clear_watches();
                 Some(Value::String("OK".into()))
             }
             Command::Watch => bail!(RedisError::WatchInsideMulti),
@@ -681,7 +691,7 @@ impl Server {
 
     // UNWATCH
     fn handle_unwatch(&mut self) -> Value {
-        self.watched_keys.clear();
+        self.clear_watches();
         Value::String("OK".into())
     }
 
@@ -689,8 +699,8 @@ impl Server {
     fn handle_watch(&mut self, args: &[Value]) -> Result<Value> {
         for arg in args {
             let key = unpack_bulk_string(arg)?;
-            let version = self.config.store.get_key_version(key);
-            self.watched_keys.insert(key.to_string(), version);
+            self.config.store.add_watcher(key, Arc::clone(&self.dirty));
+            self.watched_keys.push(key.to_string());
         }
         Ok(Value::String("OK".into()))
     }
@@ -941,6 +951,12 @@ impl Server {
             .geosearch(key, from_lon, from_lat, radius_m)?;
 
         Ok(Value::Array(results.into_iter().map(Value::Bulk).collect()))
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.clear_watches();
     }
 }
 

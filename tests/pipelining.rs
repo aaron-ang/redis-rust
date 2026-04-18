@@ -61,9 +61,7 @@ async fn read_response(stream: &mut TcpStream) -> String {
                     break;
                 }
             }
-            Ok(Ok(_)) => break,  // EOF
-            Ok(Err(_)) => break, // Error
-            Err(_) => break,     // Timeout - no more data available
+            Ok(Ok(_) | Err(_)) | Err(_) => break,
         }
     }
 

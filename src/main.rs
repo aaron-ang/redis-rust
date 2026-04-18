@@ -54,6 +54,11 @@ fn parse_yes_no(s: &str) -> Result<bool, String> {
 async fn main() -> Result<()> {
     let config = setup_config()?;
 
+    if config.appendonly {
+        let aof_dir = config.dir.join(&config.appenddirname);
+        std::fs::create_dir_all(&aof_dir)?;
+    }
+
     let addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, config.port);
     let listener = TcpListener::bind(addr).await?;
 

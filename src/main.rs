@@ -11,7 +11,7 @@ use anyhow::{bail, Result};
 use clap::Parser;
 use tokio::net::{TcpListener, TcpStream};
 
-use redis_rust::{
+use redis_rs::{
     AofOptions, AofReplayer, AofWriter, Config, Follower, ReplicaType, Server, Store,
 };
 

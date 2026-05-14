@@ -1,5 +1,5 @@
 [package]
-name = "redis-rust"
+name = "redis-rs"
 version = "0.1.0"
 authors = ["Aaron Ang"]
 edition = "2021"

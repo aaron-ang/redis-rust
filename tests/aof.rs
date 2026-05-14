@@ -3,7 +3,7 @@ use std::fs;
 use resp::Value;
 use tempfile::tempdir;
 
-use redis_rust::AofWriter;
+use redis_rs::AofWriter;
 
 #[test]
 fn setup_creates_dir_file_and_manifest_when_missing() {
